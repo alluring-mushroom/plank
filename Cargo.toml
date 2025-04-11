@@ -1,0 +1,13 @@
+[package]
+name = "plank"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+camino = "1.1.9"
+color-eyre = "0.6.3"
+env_logger = "0.11.8"
+ignore = "0.4.23"
+log = "0.4.27"
+quick-xml = { version = "0.37.4", features = ["overlapped-lists", "serialize"] }
+serde = { version = "1.0.219", features = ["derive"] }
