@@ -1,3 +1,5 @@
+use std::collections::{HashMap, HashSet};
+
 use camino::Utf8Path;
 use color_eyre::eyre::Result;
 use ignore::Walk;
@@ -17,6 +19,7 @@ struct Package {
 #[derive(Deserialize, Debug)]
 #[serde(from = "Package")]
 struct Dependencies {
+    package: String,
     build: Vec<String>,
     run: Vec<String>,
 }
@@ -30,12 +33,22 @@ impl From<Package> for Dependencies {
             run.extend(depend);
         }
 
-        Self { build, run }
+        Self {
+            package: value.name,
+            build,
+            run,
+        }
     }
 }
 
 fn main() -> Result<()> {
     env_logger::init();
+
+    // construct map of dependencies to popularity of the dependency
+
+    let mut build_popularity = HashMap::<String, u32>::new();
+    // local packages don't need to be installed, so track them
+    let mut local_packages = HashSet::<String>::new();
 
     for path in Walk::new("./")
         .into_iter()
@@ -44,9 +57,34 @@ fn main() -> Result<()> {
         .filter(|p| p.ends_with("package.xml"))
     {
         log::debug!("found package: {}", path);
+
         let content = std::fs::read_to_string(path)?;
         let data: Dependencies = from_str(&content)?;
-        println!("{:?}", data);
+
+        local_packages.insert(data.package);
+
+        for build_dependency in data.build {
+            build_popularity
+                .entry(build_dependency)
+                .and_modify(|e| *e += 1)
+                .or_insert(1);
+        }
+    }
+
+    // remove local packages from popularity list and collect
+    let mut popularity: Vec<(String, u32)> = build_popularity
+        .into_iter()
+        .filter(|(pack, _pop)| !local_packages.contains(pack))
+        .collect();
+
+    // sort first by popularity then by name
+    popularity.sort_by(|a, b| match b.1.cmp(&a.1) {
+        std::cmp::Ordering::Equal => a.0.cmp(&b.0),
+        other => other,
+    });
+
+    for (dependency, pop) in popularity {
+        println!("{}: {}", dependency, pop);
     }
 
     Ok(())
