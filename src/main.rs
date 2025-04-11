@@ -1,7 +1,9 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
+use std::process::Command;
 
 use camino::Utf8Path;
-use color_eyre::eyre::Result;
+use color_eyre::Section;
+use color_eyre::eyre::{OptionExt, Result, eyre};
 use ignore::Walk;
 use quick_xml::de::from_str;
 use serde::Deserialize;
@@ -43,6 +45,7 @@ impl From<Package> for Dependencies {
 
 fn main() -> Result<()> {
     env_logger::init();
+    color_eyre::install()?;
 
     // construct map of dependencies to popularity of the dependency
 
@@ -71,21 +74,44 @@ fn main() -> Result<()> {
         }
     }
 
-    // remove local packages from popularity list and collect
-    let mut popularity: Vec<(String, u32)> = build_popularity
+    // convert the HashMap to a BTreeMap, inverting the value and key so we can access ranges of
+    // popularity. This is assumed to be fine compared to initially constructing a BTreeMap, as
+    // we need to find the popularity first anyway, so reconstruction seems inevitable
+    let build_popularity = {
+        let mut map = BTreeMap::<u32, Vec<String>>::new();
+        for (pack, pop) in build_popularity
+            .into_iter()
+            .filter(|e| !local_packages.contains(&e.0))
+        {
+            map.entry(pop).or_insert_with(|| Vec::new()).push(pack);
+        }
+
+        map
+    };
+
+    // make a single layer from popularity 4 and above inclusive
+    let top_layer = build_popularity
+        .range(4..)
         .into_iter()
-        .filter(|(pack, _pop)| !local_packages.contains(pack))
-        .collect();
+        .map(|e| e.1.to_owned())
+        .reduce(|mut acc, mut list| {
+            acc.append(&mut list);
+            acc
+        })
+        .ok_or_eyre("no popularity above 3, cannot form top_layer")?;
 
-    // sort first by popularity then by name
-    popularity.sort_by(|a, b| match b.1.cmp(&a.1) {
-        std::cmp::Ordering::Equal => a.0.cmp(&b.0),
-        other => other,
-    });
+    // call rosdep with this data
+    let result = {
+        let bytes = std::process::Command::new("rosdep")
+            .args(["--rosdistro", "jazzy", "resolve"])
+            .args(top_layer)
+            .output()
+            .with_note(|| format!("Trying to call `rosdep`"))?
+            .stdout;
+        String::from_utf8(bytes)?
+    };
 
-    for (dependency, pop) in popularity {
-        println!("{}: {}", dependency, pop);
-    }
+    println!("{:?}", result);
 
     Ok(())
 }
