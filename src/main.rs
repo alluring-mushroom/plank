@@ -6,6 +6,7 @@ use color_eyre::Section;
 use color_eyre::eyre::{OptionExt, Result, eyre};
 use ignore::Walk;
 use quick_xml::de::from_str;
+use regex_lite::Regex;
 use serde::Deserialize;
 
 /// a colcon `package.xml` description
@@ -102,16 +103,28 @@ fn main() -> Result<()> {
 
     // call rosdep with this data
     let result = {
-        let bytes = std::process::Command::new("rosdep")
+        let output = Command::new("rosdep")
             .args(["--rosdistro", "jazzy", "resolve"])
             .args(top_layer)
             .output()
-            .with_note(|| format!("Trying to call `rosdep`"))?
-            .stdout;
-        String::from_utf8(bytes)?
+            .with_note(|| format!("Trying to call `rosdep`"))?;
+        let stderr = output.stderr;
+        if stderr.len() > 0 {
+            return Err(eyre!(String::from_utf8(stderr)?));
+        }
+        let stdout = output.stdout;
+        String::from_utf8(stdout)?
     };
 
-    println!("{:?}", result);
+    // parse result of this command line
+    // TODO: stop depending on external rosdep so this grossness isn't necessary
+    let mut apt_packages = Vec::new();
+    let apt_re = Regex::new("#apt\n(.*)\n")?;
+
+    for (_, [package]) in apt_re.captures_iter(result.as_str()).map(|c| c.extract()) {
+        apt_packages.push(package);
+        println!("{:?}", package);
+    }
 
     Ok(())
 }
