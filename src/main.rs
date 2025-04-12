@@ -1,7 +1,7 @@
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap};
 use std::process::Command;
 
-use camino::Utf8Path;
+use camino::{Utf8Path, Utf8PathBuf};
 use color_eyre::Section;
 use color_eyre::eyre::{OptionExt, Result, eyre};
 use ignore::Walk;
@@ -10,25 +10,29 @@ use regex_lite::Regex;
 use serde::Deserialize;
 
 /// a colcon `package.xml` description
-#[derive(Deserialize, Debug)]
-struct Package {
+#[derive(Deserialize, Debug, Clone)]
+struct ColconPackage {
     name: String,
     depend: Option<Vec<String>>,
     build_depend: Option<Vec<String>>,
     exec_depend: Option<Vec<String>>,
 }
 
+#[derive(Debug)]
+struct Package {
+    path: Utf8PathBuf,
+    dependencies: Dependencies,
+}
+
 /// A list of build time and runtime dependencies
 #[derive(Deserialize, Debug)]
-#[serde(from = "Package")]
 struct Dependencies {
-    package: String,
     build: Vec<String>,
     run: Vec<String>,
 }
 
-impl From<Package> for Dependencies {
-    fn from(value: Package) -> Self {
+impl From<ColconPackage> for Dependencies {
+    fn from(value: ColconPackage) -> Self {
         let mut build = value.build_depend.unwrap_or_default();
         let mut run = value.exec_depend.unwrap_or_default();
         if let Some(depend) = value.depend {
@@ -36,11 +40,7 @@ impl From<Package> for Dependencies {
             run.extend(depend);
         }
 
-        Self {
-            package: value.name,
-            build,
-            run,
-        }
+        Self { build, run }
     }
 }
 
@@ -52,7 +52,7 @@ fn main() -> Result<()> {
 
     let mut build_popularity = HashMap::<String, u32>::new();
     // local packages don't need to be installed, so track them
-    let mut local_packages = HashSet::<String>::new();
+    let mut local_packages = HashMap::<String, Package>::new();
 
     for path in Walk::new("./")
         .into_iter()
@@ -62,17 +62,21 @@ fn main() -> Result<()> {
     {
         log::debug!("found package: {}", path);
 
-        let content = std::fs::read_to_string(path)?;
-        let data: Dependencies = from_str(&content)?;
+        let content = std::fs::read_to_string(&path)?;
+        let data: ColconPackage = from_str(&content)?;
+        let package = Package {
+            path,
+            dependencies: data.clone().into(),
+        };
 
-        local_packages.insert(data.package);
-
-        for build_dependency in data.build {
+        for build_dependency in package.dependencies.build.iter() {
             build_popularity
-                .entry(build_dependency)
+                .entry(build_dependency.to_owned())
                 .and_modify(|e| *e += 1)
                 .or_insert(1);
         }
+
+        local_packages.insert(data.name, package);
     }
 
     // convert the HashMap to a BTreeMap, inverting the value and key so we can access ranges of
@@ -82,7 +86,7 @@ fn main() -> Result<()> {
         let mut map = BTreeMap::<u32, Vec<String>>::new();
         for (pack, pop) in build_popularity
             .into_iter()
-            .filter(|e| !local_packages.contains(&e.0))
+            .filter(|e| !local_packages.contains_key(&e.0))
         {
             map.entry(pop).or_insert_with(|| Vec::new()).push(pack);
         }
