@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::process::Command;
 
 use camino::{Utf8Path, Utf8PathBuf};
@@ -42,6 +42,32 @@ impl From<ColconPackage> for Dependencies {
 
         Self { build, run }
     }
+}
+
+/// resolves packages names to system names
+fn resolve_packages(args: HashSet<String>) -> Result<HashSet<String>> {
+    let rosdep = Command::new("rosdep")
+        .args(["--rosdistro", "jazzy", "resolve"])
+        .args(args)
+        .output()
+        .with_note(|| format!("Trying to call `rosdep`"))?;
+
+    if rosdep.stderr.len() > 0 {
+        return Err(eyre!(String::from_utf8(rosdep.stderr)?));
+    };
+
+    let output = String::from_utf8(rosdep.stdout)?;
+
+    // parse result of this command line
+    // TODO: stop depending on external rosdep so this grossness isn't necessary
+    let mut apt_packages = HashSet::new();
+    let apt_re = Regex::new("#apt\n(.*)\n")?;
+
+    for (_, [package]) in apt_re.captures_iter(output.as_str()).map(|c| c.extract()) {
+        apt_packages.insert(package.to_string());
+    }
+
+    Ok(apt_packages)
 }
 
 fn main() -> Result<()> {
@@ -95,7 +121,7 @@ fn main() -> Result<()> {
     };
 
     // make a single layer from popularity 4 and above inclusive
-    let top_layer = build_popularity
+    let top_layer: HashSet<String> = build_popularity
         .range(4..)
         .into_iter()
         .map(|e| e.1.to_owned())
@@ -103,32 +129,13 @@ fn main() -> Result<()> {
             acc.append(&mut list);
             acc
         })
-        .ok_or_eyre("no popularity above 3, cannot form top_layer")?;
+        .ok_or_eyre("no popularity above 3, cannot form top_layer")?
+        .into_iter()
+        .collect();
 
-    // call rosdep with this data
-    let result = {
-        let output = Command::new("rosdep")
-            .args(["--rosdistro", "jazzy", "resolve"])
-            .args(top_layer)
-            .output()
-            .with_note(|| format!("Trying to call `rosdep`"))?;
-        let stderr = output.stderr;
-        if stderr.len() > 0 {
-            return Err(eyre!(String::from_utf8(stderr)?));
-        }
-        let stdout = output.stdout;
-        String::from_utf8(stdout)?
-    };
+    let resolved_top_layer = resolve_packages(top_layer)?;
 
-    // parse result of this command line
-    // TODO: stop depending on external rosdep so this grossness isn't necessary
-    let mut apt_packages = Vec::new();
-    let apt_re = Regex::new("#apt\n(.*)\n")?;
-
-    for (_, [package]) in apt_re.captures_iter(result.as_str()).map(|c| c.extract()) {
-        apt_packages.push(package);
-        println!("{:?}", package);
-    }
+    println!("{:?}", resolved_top_layer);
 
     Ok(())
 }
