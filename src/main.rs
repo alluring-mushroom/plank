@@ -1,4 +1,5 @@
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::cmp::Ordering;
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::process::Command;
 
 use camino::{Utf8Path, Utf8PathBuf};
@@ -44,19 +45,57 @@ impl From<ColconPackage> for Dependencies {
     }
 }
 
+#[derive(Debug, Eq, PartialEq)]
+struct Layer {
+    name: String,
+    system_dependencies: Dependency,
+    local_dependencies: HashSet<String>,
+}
+
+/// ensure correct ordering of layers such that they respect Docker rules
+impl PartialOrd for Layer {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+impl Ord for Layer {
+    fn cmp(&self, other: &Self) -> Ordering {
+        if other.local_dependencies.contains(&self.name) {
+            Ordering::Less
+        } else if self.local_dependencies.contains(&other.name) {
+            Ordering::Greater
+        } else {
+            self.name.cmp(&other.name)
+        }
+    }
+}
+
+/// A dependency can either be a name as it is listed in the package, or the full system name as
+/// resolved by rosdep
+#[derive(Eq, PartialEq, Debug)]
+enum Dependency {
+    None,
+    Raw(HashSet<String>),
+    Resolved(HashSet<String>),
+}
+
 /// resolves packages names to system names
 fn resolve_packages(args: HashSet<String>) -> Result<HashSet<String>> {
-    let rosdep = Command::new("rosdep")
-        .args(["--rosdistro", "jazzy", "resolve"])
-        .args(args)
-        .output()
-        .with_note(|| format!("Trying to call `rosdep`"))?;
+    let mut rosdep = Command::new("rosdep");
+    rosdep.args(["--rosdistro", "jazzy", "resolve"]).args(args);
+    let output = rosdep.output().with_note(|| "Calling `rosdep`")?;
 
-    if rosdep.stderr.len() > 0 {
-        return Err(eyre!(String::from_utf8(rosdep.stderr)?));
+    if output.stderr.len() > 0 {
+        return Err(eyre!(String::from_utf8(output.stderr)?)).with_note(|| {
+            format!(
+                "Command: {:?} {:?}",
+                rosdep.get_program(),
+                rosdep.get_args()
+            )
+        });
     };
 
-    let output = String::from_utf8(rosdep.stdout)?;
+    let output = String::from_utf8(output.stdout)?;
 
     // parse result of this command line
     // TODO: stop depending on external rosdep so this grossness isn't necessary
@@ -133,9 +172,44 @@ fn main() -> Result<()> {
         .into_iter()
         .collect();
 
-    let resolved_top_layer = resolve_packages(top_layer)?;
+    // loop through packages to generate their apt installs
+    let mut layers = BTreeSet::new();
+    for (name, package) in &local_packages {
+        let mut system_dependencies = HashSet::new();
+        let mut local_dependencies = HashSet::new();
 
-    println!("{:?}", resolved_top_layer);
+        for dependency in &package.dependencies.build {
+            if local_packages.contains_key(dependency.as_str()) {
+                local_dependencies.insert(dependency.to_owned());
+            } else if !top_layer.contains(dependency.as_str()) {
+                system_dependencies.insert(dependency.to_owned());
+            }
+        }
+        layers.insert(Layer {
+            name: name.to_owned(),
+            system_dependencies: if system_dependencies.len() > 0 {
+                Dependency::Raw(system_dependencies)
+            } else {
+                Dependency::None
+            },
+            local_dependencies,
+        });
+    }
+
+    // resolve the layer system dependencies with rosdep
+    let layers = {
+        let mut new_layers = BTreeSet::new();
+        for mut layer in layers {
+            if let Dependency::Raw(dependencies) = layer.system_dependencies {
+                let resolved = resolve_packages(dependencies)
+                    .with_note(|| format!("parsing {}", layer.name))?;
+                layer.system_dependencies = Dependency::Resolved(resolved);
+                new_layers.insert(layer);
+            }
+        }
+    };
+
+    println!("{:?}", layers);
 
     Ok(())
 }
