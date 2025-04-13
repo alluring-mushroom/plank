@@ -3,6 +3,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::process::Command;
 
 use camino::{Utf8Path, Utf8PathBuf};
+use clap::Parser;
 use color_eyre::Section;
 use color_eyre::eyre::{OptionExt, Result, eyre};
 use ignore::Walk;
@@ -109,9 +110,29 @@ fn resolve_packages(args: HashSet<String>) -> Result<HashSet<String>> {
     Ok(apt_packages)
 }
 
+#[derive(Parser)]
+#[command(version, about, long_about = None)]
+struct Cli {
+    /// Path to search for packages. Defaults to CWD
+    path: Option<String>,
+
+    /// the minimum popularity a package needs to be in the top layer. Defaults to 4
+    #[arg(short = 'p', long)]
+    min_popularity: Option<u32>,
+
+    /// dependencies to ignore if they are seen
+    #[arg(long)]
+    ignore: Vec<String>,
+}
+
 fn main() -> Result<()> {
     env_logger::init();
     color_eyre::install()?;
+
+    let cli = Cli::parse();
+    let target_path = cli.path.unwrap_or("./".to_string());
+    let min_popularity = cli.min_popularity.unwrap_or(4);
+    let ignore: HashSet<String> = cli.ignore.into_iter().collect();
 
     // construct map of dependencies to popularity of the dependency
 
@@ -119,7 +140,7 @@ fn main() -> Result<()> {
     // local packages don't need to be installed, so track them
     let mut local_packages = HashMap::<String, Package>::new();
 
-    for path in Walk::new("./")
+    for path in Walk::new(target_path)
         .into_iter()
         .filter_map(|e| e.ok())
         .filter_map(|p| Utf8Path::from_path(p.path()).map(Utf8Path::to_path_buf))
@@ -161,14 +182,14 @@ fn main() -> Result<()> {
 
     // make a single layer from popularity 4 and above inclusive
     let top_layer: HashSet<String> = build_popularity
-        .range(4..)
+        .range(min_popularity..)
         .into_iter()
         .map(|e| e.1.to_owned())
         .reduce(|mut acc, mut list| {
             acc.append(&mut list);
             acc
         })
-        .ok_or_eyre("no popularity above 3, cannot form top_layer")?
+        .ok_or_else(|| eyre!("no popularity >= {}, cannot form top_layer", min_popularity))?
         .into_iter()
         .collect();
 
@@ -200,13 +221,24 @@ fn main() -> Result<()> {
     let layers = {
         let mut new_layers = BTreeSet::new();
         for mut layer in layers {
-            if let Dependency::Raw(dependencies) = layer.system_dependencies {
-                let resolved = resolve_packages(dependencies)
-                    .with_note(|| format!("parsing {}", layer.name))?;
-                layer.system_dependencies = Dependency::Resolved(resolved);
-                new_layers.insert(layer);
+            if let Dependency::Raw(ref dependencies) = layer.system_dependencies {
+                // exclude dependencies that are ignored by the user
+                let dependencies: HashSet<String> = dependencies
+                    .difference(&ignore)
+                    .map(|e| e.to_owned())
+                    .collect();
+                if dependencies.len() > 0 {
+                    let resolved = resolve_packages(dependencies)
+                        .with_note(|| format!("parsing {}", layer.name))?;
+                    layer.system_dependencies = Dependency::Resolved(resolved);
+                } else {
+                    layer.system_dependencies = Dependency::None;
+                }
             }
+            new_layers.insert(layer);
         }
+
+        new_layers
     };
 
     println!("{:?}", layers);
