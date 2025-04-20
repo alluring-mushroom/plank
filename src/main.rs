@@ -1,5 +1,6 @@
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::sync::LazyLock;
 
 use camino::{Utf8Path, Utf8PathBuf};
 use clap::Parser;
@@ -82,13 +83,13 @@ enum Dependency {
 /// resolves packages names to system names
 fn resolve_packages(resolver: &str, args: &HashSet<String>) -> Result<String> {
     // use regex to replace each `{}` with `args`
-    let re = Regex::new(r"(.)?\{\}")?;
+    static RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(.)?\{\}").unwrap());
     let replacement = &args
         .iter()
         .map(String::as_str)
         .collect::<Vec<&str>>()
         .join(" ");
-    let resolved = re.replace_all(resolver, |captures: &Captures| match &captures.get(1) {
+    let resolved = RE.replace_all(resolver, |captures: &Captures| match &captures.get(1) {
         Some(v) if v.as_str() == "#" => "{}".to_string(),
         Some(v) if v.as_str() == r"\" => "{}".to_string(),
         other => format!("{}{}", other.map(|v| v.as_str()).unwrap_or(""), replacement),
