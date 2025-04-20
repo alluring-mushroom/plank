@@ -20,36 +20,33 @@ struct ColconPackage {
     exec_depend: Option<Vec<String>>,
 }
 
+type Packages = HashMap<Name, Package>;
+type Name = String;
+
 #[derive(Debug)]
 struct Package {
     path: Utf8PathBuf,
-    dependencies: Dependencies,
-}
-
-/// A list of build time and runtime dependencies
-#[derive(Deserialize, Debug)]
-struct Dependencies {
     build: Vec<String>,
     run: Vec<String>,
 }
 
-impl From<ColconPackage> for Dependencies {
-    fn from(value: ColconPackage) -> Self {
-        let mut build = value.build_depend.unwrap_or_default();
-        let mut run = value.exec_depend.unwrap_or_default();
-        if let Some(depend) = value.depend {
+impl Package {
+    fn from_colcon_package(path: Utf8PathBuf, colcon_package: ColconPackage) -> Self {
+        let mut build = colcon_package.build_depend.unwrap_or_default();
+        let mut run = colcon_package.exec_depend.unwrap_or_default();
+        if let Some(depend) = colcon_package.depend {
             build.extend(depend.clone());
             run.extend(depend);
         }
 
-        Self { build, run }
+        Self { path, build, run }
     }
 }
 
 #[derive(Debug, Eq, PartialEq)]
 struct Layer {
     name: String,
-    system_dependencies: Dependency,
+    system_dependencies: Dependencies,
     local_dependencies: HashSet<String>,
 }
 
@@ -74,7 +71,7 @@ impl Ord for Layer {
 /// A dependency can either be a name as it is listed in the package, or the full system name as
 /// resolved by rosdep
 #[derive(Eq, PartialEq, Debug)]
-enum Dependency {
+enum Dependencies {
     None,
     Raw(HashSet<String>),
     Resolved(String),
@@ -131,9 +128,9 @@ fn main() -> Result<()> {
 
     // construct map of dependencies to popularity of the dependency
 
-    let mut build_popularity = HashMap::<String, u32>::new();
+    let mut build_popularity = HashMap::<Name, u32>::new();
     // local packages don't need to be installed, so track them
-    let mut local_packages = HashMap::<String, Package>::new();
+    let mut local_packages = Packages::new();
 
     for path in Walk::new(target_path)
         .into_iter()
@@ -145,19 +142,17 @@ fn main() -> Result<()> {
 
         let content = std::fs::read_to_string(&path)?;
         let data: ColconPackage = from_str(&content)?;
-        let package = Package {
-            path,
-            dependencies: data.clone().into(),
-        };
+        let name = data.name.clone();
+        let package = Package::from_colcon_package(path, data);
 
-        for build_dependency in package.dependencies.build.iter() {
+        for build_dependency in package.build.iter() {
             build_popularity
                 .entry(build_dependency.to_owned())
                 .and_modify(|e| *e += 1)
                 .or_insert(1);
         }
 
-        local_packages.insert(data.name, package);
+        local_packages.insert(name, package);
     }
 
     // convert the HashMap to a BTreeMap, inverting the value and key so we can access ranges of
@@ -188,13 +183,15 @@ fn main() -> Result<()> {
         .into_iter()
         .collect();
 
-    // loop through packages to generate their apt installs
+    // loop through packages to create layers, which requires separating local dependencies
+    // (packages that are on this system) and system dependencies, which will be resolved using a
+    // resolver
     let mut layers = BTreeSet::new();
     for (name, package) in &local_packages {
         let mut system_dependencies = HashSet::new();
         let mut local_dependencies = HashSet::new();
 
-        for dependency in &package.dependencies.build {
+        for dependency in &package.build {
             if local_packages.contains_key(dependency.as_str()) {
                 local_dependencies.insert(dependency.to_owned());
             } else if !top_layer.contains(dependency.as_str()) {
@@ -204,9 +201,9 @@ fn main() -> Result<()> {
         layers.insert(Layer {
             name: name.to_owned(),
             system_dependencies: if system_dependencies.len() > 0 {
-                Dependency::Raw(system_dependencies)
+                Dependencies::Raw(system_dependencies)
             } else {
-                Dependency::None
+                Dependencies::None
             },
             local_dependencies,
         });
@@ -217,7 +214,7 @@ fn main() -> Result<()> {
     let layers = {
         let mut new_layers = BTreeSet::new();
         for mut layer in layers {
-            if let Dependency::Raw(ref dependencies) = layer.system_dependencies {
+            if let Dependencies::Raw(ref dependencies) = layer.system_dependencies {
                 // exclude dependencies that are ignored by the user
                 let dependencies: HashSet<String> = dependencies
                     .difference(&ignore)
@@ -226,9 +223,9 @@ fn main() -> Result<()> {
                 if dependencies.len() > 0 {
                     let resolved = resolve_packages(resolver, &dependencies)
                         .with_note(|| format!("parsing {}", layer.name))?;
-                    layer.system_dependencies = Dependency::Resolved(resolved);
+                    layer.system_dependencies = Dependencies::Resolved(resolved);
                 } else {
-                    layer.system_dependencies = Dependency::None;
+                    layer.system_dependencies = Dependencies::None;
                 }
             }
             new_layers.insert(layer);
