@@ -1,14 +1,13 @@
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
-use std::process::Command;
 
 use camino::{Utf8Path, Utf8PathBuf};
 use clap::Parser;
 use color_eyre::Section;
-use color_eyre::eyre::{OptionExt, Result, eyre};
+use color_eyre::eyre::{Result, eyre};
 use ignore::Walk;
 use quick_xml::de::from_str;
-use regex_lite::Regex;
+use regex_lite::{Captures, Regex};
 use serde::Deserialize;
 
 /// a colcon `package.xml` description
@@ -77,37 +76,25 @@ impl Ord for Layer {
 enum Dependency {
     None,
     Raw(HashSet<String>),
-    Resolved(HashSet<String>),
+    Resolved(String),
 }
 
 /// resolves packages names to system names
-fn resolve_packages(args: HashSet<String>) -> Result<HashSet<String>> {
-    let mut rosdep = Command::new("rosdep");
-    rosdep.args(["--rosdistro", "jazzy", "resolve"]).args(args);
-    let output = rosdep.output().with_note(|| "Calling `rosdep`")?;
+fn resolve_packages(resolver: &str, args: &HashSet<String>) -> Result<String> {
+    // use regex to replace each `{}` with `args`
+    let re = Regex::new(r"(.)?\{\}")?;
+    let replacement = &args
+        .iter()
+        .map(String::as_str)
+        .collect::<Vec<&str>>()
+        .join(" ");
+    let resolved = re.replace_all(resolver, |captures: &Captures| match &captures.get(1) {
+        Some(v) if v.as_str() == "#" => "{}".to_string(),
+        Some(v) if v.as_str() == r"\" => "{}".to_string(),
+        other => format!("{}{}", other.map(|v| v.as_str()).unwrap_or(""), replacement),
+    });
 
-    if output.stderr.len() > 0 {
-        return Err(eyre!(String::from_utf8(output.stderr)?)).with_note(|| {
-            format!(
-                "Command: {:?} {:?}",
-                rosdep.get_program(),
-                rosdep.get_args()
-            )
-        });
-    };
-
-    let output = String::from_utf8(output.stdout)?;
-
-    // parse result of this command line
-    // TODO: stop depending on external rosdep so this grossness isn't necessary
-    let mut apt_packages = HashSet::new();
-    let apt_re = Regex::new("#apt\n(.*)\n")?;
-
-    for (_, [package]) in apt_re.captures_iter(output.as_str()).map(|c| c.extract()) {
-        apt_packages.insert(package.to_string());
-    }
-
-    Ok(apt_packages)
+    Ok(resolved.into_owned())
 }
 
 #[derive(Parser)]
@@ -119,6 +106,12 @@ struct Cli {
     /// the minimum popularity a package needs to be in the top layer. Defaults to 4
     #[arg(short = 'p', long)]
     min_popularity: Option<u32>,
+
+    /// Command to convert a dependency name to an action, such as apt installing
+    /// Any occurance of `{}` will be replaced with the dependencies for a single package
+    /// use either `\` or `#` to escape this, eg. `echo \{}` will result in `echo {}`
+    #[arg(short, long)]
+    resolver: String,
 
     /// dependencies to ignore if they are seen
     #[arg(long)]
@@ -132,6 +125,7 @@ fn main() -> Result<()> {
     let cli = Cli::parse();
     let target_path = cli.path.unwrap_or("./".to_string());
     let min_popularity = cli.min_popularity.unwrap_or(4);
+    let resolver = cli.resolver.as_str();
     let ignore: HashSet<String> = cli.ignore.into_iter().collect();
 
     // construct map of dependencies to popularity of the dependency
@@ -217,7 +211,8 @@ fn main() -> Result<()> {
         });
     }
 
-    // resolve the layer system dependencies with rosdep
+    // replace the list of dependencies with the resolver, a command to run that will install those
+    // dependencies
     let layers = {
         let mut new_layers = BTreeSet::new();
         for mut layer in layers {
@@ -228,7 +223,7 @@ fn main() -> Result<()> {
                     .map(|e| e.to_owned())
                     .collect();
                 if dependencies.len() > 0 {
-                    let resolved = resolve_packages(dependencies)
+                    let resolved = resolve_packages(resolver, &dependencies)
                         .with_note(|| format!("parsing {}", layer.name))?;
                     layer.system_dependencies = Dependency::Resolved(resolved);
                 } else {
