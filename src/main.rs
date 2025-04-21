@@ -215,11 +215,8 @@ fn main() -> Result<()> {
         let mut new_layers = BTreeSet::new();
         for mut layer in layers {
             if let Dependencies::Raw(ref dependencies) = layer.system_dependencies {
-                // exclude dependencies that are ignored by the user
-                let dependencies: HashSet<String> = dependencies
-                    .difference(&ignore)
-                    .map(|e| e.to_owned())
-                    .collect();
+                // exclude dependencies that are ignored by the user and in the top layer
+                let dependencies: HashSet<String> = dependencies - &(&ignore - &top_layer);
                 if dependencies.len() > 0 {
                     let resolved = resolve_packages(resolver, &dependencies)
                         .with_note(|| format!("parsing {}", layer.name))?;
