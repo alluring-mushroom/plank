@@ -47,7 +47,7 @@ impl Package {
 struct Layer {
     name: String,
     system_dependencies: Dependencies,
-    local_dependencies: HashSet<String>,
+    local_dependencies: BTreeSet<String>,
 }
 
 /// ensure correct ordering of layers such that they respect Docker rules
@@ -73,17 +73,22 @@ impl Ord for Layer {
 #[derive(Eq, PartialEq, Debug)]
 enum Dependencies {
     None,
-    Raw(HashSet<String>),
-    Resolved(String),
+    Raw(BTreeSet<String>),
+    Resolved(BTreeSet<String>),
 }
 
 /// resolves packages names to system names
-fn resolve_packages(resolver: &str, args: &HashSet<String>) -> Result<String> {
+fn resolve_packages<'a, I, T>(resolver: &str, args: I) -> Result<String>
+where
+    I: std::iter::IntoIterator<Item = T>,
+    T: AsRef<str>,
+{
     // use regex to replace each `{}` with `args`
     static RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(.)?\{\}").unwrap());
+    let args: Vec<T> = args.into_iter().collect();
     let replacement = &args
         .iter()
-        .map(String::as_str)
+        .map(AsRef::as_ref)
         .collect::<Vec<&str>>()
         .join(" ");
     let resolved = RE.replace_all(resolver, |captures: &Captures| match &captures.get(1) {
@@ -108,8 +113,15 @@ struct Cli {
     /// Command to convert a dependency name to an action, such as apt installing
     /// Any occurance of `{}` will be replaced with the dependencies for a single package
     /// use either `\` or `#` to escape this, eg. `echo \{}` will result in `echo {}`
-    #[arg(short, long)]
-    resolver: String,
+    #[arg(short = 'r', long)]
+    default_resolver: String,
+
+    /// a command to resolve a single package. It is of the form `regex:command`. If command is
+    /// a blank string, the package is simply not resolved, if it is non-empty it is treated
+    /// the same as `default_resolver`, but for this specific package, including subsitutions. See
+    /// `default_resolver` for more information
+    #[arg(long)]
+    package: Vec<String>,
 
     /// dependencies to ignore if they are seen
     #[arg(long)]
@@ -123,8 +135,16 @@ fn main() -> Result<()> {
     let cli = Cli::parse();
     let target_path = cli.path.unwrap_or("./".to_string());
     let min_popularity = cli.min_popularity.unwrap_or(4);
-    let resolver = cli.resolver.as_str();
-    let ignore: HashSet<String> = cli.ignore.into_iter().collect();
+    let default_resolver = cli.default_resolver.as_str();
+    let package_resolvers = {
+        let resolvers: Result<HashMap<&str, &str>, &str> = cli
+            .package
+            .iter()
+            .map(|s| s.split_once(":").ok_or(s.as_str()))
+            .collect();
+        resolvers.map_err(|e| eyre!("Couldn't process a --package argument: '{}'", e))?
+    };
+    let ignore: BTreeSet<String> = cli.ignore.into_iter().collect();
 
     // construct map of dependencies to popularity of the dependency
 
@@ -171,7 +191,7 @@ fn main() -> Result<()> {
     };
 
     // make a single layer from popularity 4 and above inclusive
-    let top_layer: HashSet<String> = build_popularity
+    let top_layer: BTreeSet<String> = build_popularity
         .range(min_popularity..)
         .into_iter()
         .map(|e| e.1.to_owned())
@@ -188,8 +208,8 @@ fn main() -> Result<()> {
     // resolver
     let mut layers = BTreeSet::new();
     for (name, package) in &local_packages {
-        let mut system_dependencies = HashSet::new();
-        let mut local_dependencies = HashSet::new();
+        let mut system_dependencies = BTreeSet::new();
+        let mut local_dependencies = BTreeSet::new();
 
         for dependency in &package.build {
             if local_packages.contains_key(dependency.as_str()) {
@@ -215,11 +235,26 @@ fn main() -> Result<()> {
         let mut new_layers = BTreeSet::new();
         for mut layer in layers {
             if let Dependencies::Raw(ref dependencies) = layer.system_dependencies {
+                let mut resolved = BTreeSet::new();
+                let mut remaining = BTreeSet::new();
                 // exclude dependencies that are ignored by the user and in the top layer
-                let dependencies: HashSet<String> = dependencies - &(&ignore - &top_layer);
+                let dependencies: BTreeSet<String> = dependencies - &(&ignore - &top_layer);
                 if dependencies.len() > 0 {
-                    let resolved = resolve_packages(resolver, &dependencies)
-                        .with_note(|| format!("parsing {}", layer.name))?;
+                    for dependency in dependencies {
+                        if let Some(&command) = package_resolvers.get(dependency.as_str()) {
+                            if command.is_empty() {
+                                continue;
+                            };
+                            resolved
+                                .insert(resolve_packages(command, std::iter::once(dependency))?);
+                        } else {
+                            remaining.insert(dependency.to_owned());
+                        }
+                    }
+                    resolved.insert(
+                        resolve_packages(default_resolver, &remaining)
+                            .with_note(|| format!("parsing {}", layer.name))?,
+                    );
                     layer.system_dependencies = Dependencies::Resolved(resolved);
                 } else {
                     layer.system_dependencies = Dependencies::None;
