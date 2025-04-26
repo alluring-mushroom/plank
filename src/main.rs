@@ -1,5 +1,7 @@
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::fs::File;
+use std::io::Write;
 use std::sync::LazyLock;
 
 use camino::{Utf8Path, Utf8PathBuf};
@@ -51,6 +53,7 @@ impl Package {
 #[derive(Debug, Eq, PartialEq)]
 struct Layer {
     name: String,
+    path: Utf8PathBuf,
     system_dependencies: Dependencies,
     local_dependencies: BTreeSet<String>,
 }
@@ -105,6 +108,14 @@ struct Cli {
     /// Path to search for packages. Defaults to CWD
     path: Option<String>,
 
+    /// the base image that each layer will use
+    #[arg(long)]
+    base: String,
+
+    /// the location to write the output to
+    #[arg(long)]
+    output: Option<String>,
+
     /// the minimum popularity a package needs to be in the top layer. Defaults to 4
     #[arg(short = 'p', long)]
     min_popularity: Option<u32>,
@@ -133,6 +144,8 @@ fn main() -> Result<()> {
 
     let cli = Cli::parse();
     let target_path = cli.path.unwrap_or("./".to_string());
+    let output_path = Utf8PathBuf::from(cli.output.unwrap_or("Dockerfile".to_string()));
+    let base_image = cli.base.as_str();
     let min_popularity = cli.min_popularity.unwrap_or(4);
     let default_resolver = cli.default_resolver.as_str();
     let package_resolvers = {
@@ -151,7 +164,7 @@ fn main() -> Result<()> {
     // local packages don't need to be installed, so track them
     let mut local_packages = Packages::new();
 
-    for path in Walk::new(target_path)
+    for path in Walk::new(&target_path)
         .into_iter()
         .filter_map(|e| e.ok())
         .filter_map(|p| Utf8Path::from_path(p.path()).map(Utf8Path::to_path_buf))
@@ -162,7 +175,13 @@ fn main() -> Result<()> {
         let content = std::fs::read_to_string(&path)?;
         let data: ColconPackage = from_str(&content)?;
         let name = data.name.clone();
-        let package = Package::from_colcon_package(path, data);
+        let package = Package::from_colcon_package(
+            path.strip_prefix(&target_path)?
+                .parent()
+                .ok_or_else(|| eyre!("Couldn't find parent of {}", target_path))?
+                .to_path_buf(),
+            data,
+        );
 
         for build_dependency in package.build.iter() {
             build_popularity
@@ -219,6 +238,7 @@ fn main() -> Result<()> {
         }
         layers.insert(Layer {
             name: name.to_owned(),
+            path: package.path.clone(),
             system_dependencies: if system_dependencies.len() > 0 {
                 Dependencies::Raw(system_dependencies)
             } else {
@@ -277,5 +297,44 @@ fn main() -> Result<()> {
         graph
     };
 
+    let resolved_top_layer = resolve_packages(default_resolver, top_layer)?;
+    let mut out_file = File::create(output_path)?;
+
+    let build_base = "base";
+
+    //beginning of dockerfile
+    writeln!(out_file, "from {} as {}", base_image, build_base)?;
+    writeln!(out_file, "shell [\"bash\", \"-c\"]")?;
+    writeln!(out_file, "run apt update && rosdep update && run {}", resolved_top_layer)?;
+
+
+    // generate dockerfile with these layers
+    let a = Topo::new(&graph);
+    for name in a.iter(&graph) {
+        let layer = &layers[name];
+        writeln!(out_file, "")?;
+        writeln!(out_file, "from {} as {}", build_base, layer.name)?;
+        writeln!(out_file, "workdir /package")?;
+        if let Dependencies::Resolved(commands) = &layer.system_dependencies {
+            for command in commands {
+                writeln!(out_file, "run {}", command)?;
+            }
+        }
+        for local in &layer.local_dependencies {
+            writeln!(
+                out_file,
+                "copy --link --from={l} /package/install/ ./install/",
+                l = local
+            )?;
+        }
+        writeln!(out_file, "copy {} /package/{}", layer.path, layer.name)?;
+        {
+            write!(out_file, "run source /opt/ros/jazzy/setup.bash")?;
+            if layer.local_dependencies.len() > 0 {
+                write!(out_file, " && source ./install/local_setup.bash")?;
+            }
+            writeln!(out_file, "; colcon build")?;
+        }
+    }
     Ok(())
 }
