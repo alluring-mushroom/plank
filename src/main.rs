@@ -1,5 +1,5 @@
 use std::cmp::Ordering;
-use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::LazyLock;
 
 use camino::{Utf8Path, Utf8PathBuf};
@@ -7,6 +7,11 @@ use clap::Parser;
 use color_eyre::Section;
 use color_eyre::eyre::{Result, eyre};
 use ignore::Walk;
+use petgraph::{
+    Directed,
+    graphmap::GraphMap,
+    visit::{Topo, Walker},
+};
 use quick_xml::de::from_str;
 use regex_lite::{Captures, Regex};
 use serde::Deserialize;
@@ -58,13 +63,7 @@ impl PartialOrd for Layer {
 }
 impl Ord for Layer {
     fn cmp(&self, other: &Self) -> Ordering {
-        if other.local_dependencies.contains(&self.name) {
-            Ordering::Less
-        } else if self.local_dependencies.contains(&other.name) {
-            Ordering::Greater
-        } else {
-            self.name.cmp(&other.name)
-        }
+        self.name.cmp(&other.name)
     }
 }
 
@@ -232,7 +231,7 @@ fn main() -> Result<()> {
     // replace the list of dependencies with the resolver, a command to run that will install those
     // dependencies
     let layers = {
-        let mut new_layers = BTreeSet::new();
+        let mut new_layers = BTreeMap::new();
         for mut layer in layers {
             if let Dependencies::Raw(ref dependencies) = layer.system_dependencies {
                 let mut resolved = BTreeSet::new();
@@ -260,13 +259,23 @@ fn main() -> Result<()> {
                     layer.system_dependencies = Dependencies::None;
                 }
             }
-            new_layers.insert(layer);
+            new_layers.insert(layer.name.clone(), layer);
         }
 
         new_layers
     };
 
-    println!("{:?}", layers);
+    // make layers into a graph for topological sorting
+    let graph = {
+        let mut graph = GraphMap::<&str, (), Directed>::new();
+        for (_, layer) in &layers {
+            for local in &layer.local_dependencies {
+                graph.add_edge(local.as_str(), layer.name.as_str(), ());
+            }
+        }
+
+        graph
+    };
 
     Ok(())
 }
