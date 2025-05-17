@@ -4,10 +4,11 @@ use std::fs::File;
 use std::io::Write;
 use std::sync::LazyLock;
 
+use atomic_write_file::AtomicWriteFile;
 use camino::{Utf8Path, Utf8PathBuf};
 use clap::Parser;
 use color_eyre::Section;
-use color_eyre::eyre::{Result, eyre};
+use color_eyre::eyre::{Result, WrapErr, eyre};
 use ignore::Walk;
 use petgraph::{
     Directed,
@@ -318,7 +319,20 @@ fn main() -> Result<()> {
 
     let resolved_top_layer = resolve_packages(default_resolver, top_layer)?;
 
-    let mut out_file = File::create(output_path)?;
+    // if the original file contained anything, save a backup
+    if let Some(contents) = std::fs::read(&output_path).ok() {
+        // we don't try and save the backup though
+        let mut bak_file = File::create(
+            output_path.with_extension(output_path.extension().unwrap_or("").to_string() + "bak"),
+        )
+        .wrap_err("Creating backup file")?;
+
+        bak_file.write_all(&contents)?;
+    }
+
+    // use atomic files so the file is not left in a weird or malformed state in the event of
+    // badness
+    let mut out_file = AtomicWriteFile::options().open(output_path)?;
 
     for dockerfile in include_dockerfiles {
         let dockerfile = std::fs::read(dockerfile)?;
@@ -355,5 +369,7 @@ fn main() -> Result<()> {
         writeln!(out_file, "copy {} /package/{}", layer.path, layer.name)?;
         writeln!(out_file, "run {}", build_command)?;
     }
+
+    out_file.commit()?;
     Ok(())
 }
