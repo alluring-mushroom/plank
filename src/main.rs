@@ -108,6 +108,17 @@ struct Cli {
     /// Path to search for packages. Defaults to CWD
     path: Option<String>,
 
+    /// Embed the contents of another Dockerfile in this one. It will be as if they are
+    /// concatenated, with the options specified here coming before the content this program
+    /// generates. May be specified more than once
+    #[arg(long)]
+    include: Vec<String>,
+
+    /// location in each layer that build artifacts are stored. This is needed so that dependent
+    /// code can be copied to the next layer
+    #[arg(long)]
+    artifact_dir: Option<String>,
+
     /// the base image that each layer will use
     #[arg(long)]
     base: String,
@@ -133,6 +144,10 @@ struct Cli {
     #[arg(long)]
     package: Vec<String>,
 
+    /// The command used to build the package
+    #[arg(long)]
+    build_command: String,
+
     /// dependencies to ignore if they are seen
     #[arg(long)]
     ignore: Vec<String>,
@@ -145,6 +160,9 @@ fn main() -> Result<()> {
     let cli = Cli::parse();
     let target_path = cli.path.unwrap_or("./".to_string());
     let output_path = Utf8PathBuf::from(cli.output.unwrap_or("Dockerfile".to_string()));
+    let include_dockerfiles = cli.include.into_iter().map(Utf8PathBuf::from);
+    let artifact_dir = cli.artifact_dir.unwrap_or("build".to_string());
+    let artifact_dir = artifact_dir.as_str();
     let base_image = cli.base.as_str();
     let min_popularity = cli.min_popularity.unwrap_or(4);
     let default_resolver = cli.default_resolver.as_str();
@@ -156,6 +174,7 @@ fn main() -> Result<()> {
             .collect();
         resolvers.map_err(|e| eyre!("Couldn't process a --package argument: '{}'", e))?
     };
+    let build_command = cli.build_command.as_str();
     let ignore: BTreeSet<String> = cli.ignore.into_iter().collect();
 
     // construct map of dependencies to popularity of the dependency
@@ -298,21 +317,26 @@ fn main() -> Result<()> {
     };
 
     let resolved_top_layer = resolve_packages(default_resolver, top_layer)?;
+
     let mut out_file = File::create(output_path)?;
+
+    for dockerfile in include_dockerfiles {
+        let dockerfile = std::fs::read(dockerfile)?;
+        out_file.write_all(&dockerfile)?;
+    }
+    writeln!(out_file)?;
 
     let build_base = "base";
 
     //beginning of dockerfile
     writeln!(out_file, "from {} as {}", base_image, build_base)?;
-    writeln!(out_file, "shell [\"bash\", \"-c\"]")?;
-    writeln!(out_file, "run apt update && rosdep update && run {}", resolved_top_layer)?;
-
+    writeln!(out_file, "run {}", resolved_top_layer)?;
 
     // generate dockerfile with these layers
     let a = Topo::new(&graph);
     for name in a.iter(&graph) {
         let layer = &layers[name];
-        writeln!(out_file, "")?;
+        writeln!(out_file)?;
         writeln!(out_file, "from {} as {}", build_base, layer.name)?;
         writeln!(out_file, "workdir /package")?;
         if let Dependencies::Resolved(commands) = &layer.system_dependencies {
@@ -323,18 +347,13 @@ fn main() -> Result<()> {
         for local in &layer.local_dependencies {
             writeln!(
                 out_file,
-                "copy --link --from={l} /package/install/ ./install/",
-                l = local
+                "copy --link --from={} /package/{a}/ ./{a}/",
+                local,
+                a = artifact_dir,
             )?;
         }
         writeln!(out_file, "copy {} /package/{}", layer.path, layer.name)?;
-        {
-            write!(out_file, "run source /opt/ros/jazzy/setup.bash")?;
-            if layer.local_dependencies.len() > 0 {
-                write!(out_file, " && source ./install/local_setup.bash")?;
-            }
-            writeln!(out_file, "; colcon build")?;
-        }
+        writeln!(out_file, "run {}", build_command)?;
     }
     Ok(())
 }
