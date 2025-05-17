@@ -77,7 +77,7 @@ impl Ord for Layer {
 enum Dependencies {
     None,
     Raw(BTreeSet<String>),
-    Resolved(BTreeSet<String>),
+    Resolved(Vec<String>),
 }
 
 /// resolves packages names to system names
@@ -274,7 +274,7 @@ fn main() -> Result<()> {
         let mut new_layers = BTreeMap::new();
         for mut layer in layers {
             if let Dependencies::Raw(ref dependencies) = layer.system_dependencies {
-                let mut resolved = BTreeSet::new();
+                let mut resolved = Vec::new();
                 let mut remaining = BTreeSet::new();
                 // exclude dependencies that are ignored by the user and in the top layer
                 let dependencies: BTreeSet<String> = dependencies - &(&ignore - &top_layer);
@@ -284,13 +284,12 @@ fn main() -> Result<()> {
                             if command.is_empty() {
                                 continue;
                             };
-                            resolved
-                                .insert(resolve_packages(command, std::iter::once(dependency))?);
+                            resolved.push(resolve_packages(command, std::iter::once(dependency))?);
                         } else {
                             remaining.insert(dependency.to_owned());
                         }
                     }
-                    resolved.insert(
+                    resolved.push(
                         resolve_packages(default_resolver, &remaining)
                             .with_note(|| format!("parsing {}", layer.name))?,
                     );
@@ -354,7 +353,7 @@ fn main() -> Result<()> {
         writeln!(out_file, "from {} as {}", build_base, layer.name)?;
         writeln!(out_file, "workdir /package")?;
         if let Dependencies::Resolved(commands) = &layer.system_dependencies {
-            for command in commands {
+            for command in commands.iter().rev() {
                 writeln!(out_file, "run {}", command)?;
             }
         }
