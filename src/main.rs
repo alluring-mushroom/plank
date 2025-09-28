@@ -158,6 +158,7 @@ fn main() -> Result<()> {
     env_logger::init();
     color_eyre::install()?;
 
+    // get cli args from user
     let cli = Cli::parse();
     let target_path = cli.path.unwrap_or("./".to_string());
     let output_path = Utf8PathBuf::from(cli.output.unwrap_or("Dockerfile".to_string()));
@@ -179,7 +180,6 @@ fn main() -> Result<()> {
     let ignore: BTreeSet<String> = cli.ignore.into_iter().collect();
 
     // construct map of dependencies to popularity of the dependency
-
     let mut build_popularity = HashMap::<Name, u32>::new();
     // local packages don't need to be installed, so track them
     let mut local_packages = Packages::new();
@@ -240,6 +240,7 @@ fn main() -> Result<()> {
         .ok_or_else(|| eyre!("no popularity >= {}, cannot form top_layer", min_popularity))?
         .into_iter()
         .collect();
+    log::debug!("Top layer will consist of {:?}", &top_layer);
 
     // loop through packages to create layers, which requires separating local dependencies
     // (packages that are on this system) and system dependencies, which will be resolved using a
@@ -256,6 +257,7 @@ fn main() -> Result<()> {
                 system_dependencies.insert(dependency.to_owned());
             }
         }
+        log::debug!("Creating build layer for {}", &name);
         layers.insert(Layer {
             name: name.to_owned(),
             path: package.path.clone(),
@@ -298,6 +300,7 @@ fn main() -> Result<()> {
                     layer.system_dependencies = Dependencies::None;
                 }
             }
+            log::debug!("resolve layer for {}", &layer.name);
             new_layers.insert(layer.name.clone(), layer);
         }
 
@@ -311,11 +314,15 @@ fn main() -> Result<()> {
             for local in &layer.local_dependencies {
                 graph.add_edge(local.as_str(), layer.name.as_str(), ());
             }
+            graph.add_node(layer.name.as_str());
+
+            log::debug!("adding {} to build graph", &layer.name);
         }
 
         graph
     };
 
+    // Begin building the Dockerfile
     let resolved_top_layer = resolve_packages(default_resolver, top_layer)?;
 
     // if the original file contained anything, save a backup
@@ -326,6 +333,7 @@ fn main() -> Result<()> {
         )
         .wrap_err("Creating backup file")?;
 
+        log::debug!("created backup file");
         bak_file.write_all(&contents)?;
     }
 
@@ -334,7 +342,9 @@ fn main() -> Result<()> {
     let mut out_file = AtomicWriteFile::options().open(output_path)?;
 
     for dockerfile in include_dockerfiles {
-        let dockerfile = std::fs::read(dockerfile)?;
+        let dockerfile = std::fs::read(&dockerfile)
+            .wrap_err_with(|| format!("Can't read the specified Dockerfile: {}", &dockerfile))
+            .with_note(|| "Dockerfiles are specified with --include")?;
         out_file.write_all(&dockerfile)?;
     }
     writeln!(out_file)?;
@@ -348,6 +358,7 @@ fn main() -> Result<()> {
     // generate dockerfile with these layers
     let a = Topo::new(&graph);
     for name in a.iter(&graph) {
+        log::debug!("adding {} to Dockerfile", &name);
         let layer = &layers[name];
         writeln!(out_file)?;
         writeln!(out_file, "from {} as {}", build_base, layer.name)?;
