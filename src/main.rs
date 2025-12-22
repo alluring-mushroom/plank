@@ -328,12 +328,14 @@ fn main() -> Result<()> {
     // if the original file contained anything, save a backup
     if let Some(contents) = std::fs::read(&output_path).ok() {
         // we don't try and save the backup though
-        let mut bak_file = File::create(
-            output_path.with_extension(output_path.extension().unwrap_or("").to_string() + "bak"),
-        )
-        .wrap_err("Creating backup file")?;
+        let name =
+            output_path.with_extension(output_path.extension().unwrap_or("").to_string() + "bak");
+        let mut bak_file = File::create(&name).wrap_err("Creating backup file")?;
 
-        log::debug!("created backup file");
+        log::warn!(
+            "created backup file `{}`. Only one backup is kept per run, so if one exists, it will be overwritten",
+            name
+        );
         bak_file.write_all(&contents)?;
     }
 
