@@ -344,15 +344,30 @@ fn main() -> Result<()> {
 
     // use atomic files so the file is not left in a weird or malformed state in the event of
     // badness
-    let mut out_file = AtomicWriteFile::options().open(output_path)?;
+    let mut out_file = AtomicWriteFile::options().open(&output_path)?;
 
-    for dockerfile in include_dockerfiles {
-        let dockerfile = std::fs::read(&dockerfile)
-            .wrap_err_with(|| format!("Can't read the specified Dockerfile: {}", &dockerfile))
-            .with_note(|| "Dockerfiles are specified with --include")?;
-        out_file.write_all(&dockerfile)?;
+    if include_dockerfiles.len() > 0 {
+        for dockerfile_name in include_dockerfiles {
+            writeln!(
+                out_file,
+                "#--- include `{dockerfile_name}` ---\n#{}",
+                "-".repeat(80)
+            )?;
+
+            let dockerfile = std::fs::read(&dockerfile_name)
+                .wrap_err_with(|| {
+                    format!("Can't read the specified Dockerfile: {}", &dockerfile_name)
+                })
+                .with_note(|| "Dockerfiles are specified with --include")?;
+            out_file.write_all(&dockerfile)?;
+
+            writeln!(
+                out_file,
+                "\n#--- end `{dockerfile_name}` ---\n#{}\n\n",
+                "-".repeat(80)
+            )?;
+        }
     }
-    writeln!(out_file)?;
 
     let build_base = "base";
 
