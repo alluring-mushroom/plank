@@ -9,6 +9,7 @@ use camino::{Utf8Path, Utf8PathBuf};
 use clap::Parser;
 use color_eyre::Section;
 use color_eyre::eyre::{Result, WrapErr, eyre};
+use env_logger::Env;
 use ignore::Walk;
 use petgraph::{
     Directed,
@@ -155,7 +156,7 @@ struct Cli {
 }
 
 fn main() -> Result<()> {
-    env_logger::init();
+    env_logger::Builder::from_env(Env::default().default_filter_or("info")).init();
     color_eyre::install()?;
 
     // get cli args from user
