@@ -18,7 +18,12 @@ use petgraph::{
 };
 use quick_xml::de::from_str;
 use regex_lite::{Captures, Regex};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
+
+#[derive(Serialize, Deserialize, Debug)]
+struct Plankconfig {
+    pub top_layer: BTreeSet<String>,
+}
 
 /// a colcon `package.xml` description
 #[derive(Deserialize, Debug, Clone)]
@@ -153,6 +158,10 @@ struct Cli {
     /// dependencies to ignore if they are seen
     #[arg(long)]
     ignore: Vec<String>,
+
+    /// whether to overwrite the top_layer of the dockerimage
+    #[arg(long)]
+    overwrite_top_layer: bool,
 }
 
 fn main() -> Result<()> {
@@ -179,6 +188,7 @@ fn main() -> Result<()> {
     };
     let build_command = cli.build_command.as_str();
     let ignore: BTreeSet<String> = cli.ignore.into_iter().collect();
+    let overwrite_top_layer = cli.overwrite_top_layer;
 
     // construct map of dependencies to popularity of the dependency
     let mut build_popularity = HashMap::<Name, u32>::new();
@@ -326,6 +336,31 @@ fn main() -> Result<()> {
     };
 
     // Begin building the Dockerfile
+    let top_layer =
+        // we don't want to overwrite the top layer, as this is likely the most expensive to build.
+        // instead, we compare to the last saved run, and use that without the correct flag being given
+        if let Some(contents) = std::fs::read(".plankconfig").ok() && !overwrite_top_layer {
+            let plankconfig: Plankconfig = serde_json::from_slice(&contents)?;
+            if plankconfig.top_layer != top_layer {
+                log::warn!(
+                    "The toplayer would be updated. This will lead to longer build times. Falling back to the last top layer"
+                );
+                log::warn!(
+                    "To overwrite this, use the flag `--overwrite-top-layer`. To see what has changed, run in debug mode"
+                );
+            }
+            plankconfig.top_layer
+        } else {
+            let mut out_file = AtomicWriteFile::options().open(".plankconfig")?;
+            let data = Plankconfig {
+                top_layer: top_layer.clone(),
+            };
+            out_file.write_all(serde_json::to_string(&data)?.as_bytes())?;
+            out_file.commit()?;
+
+            top_layer
+       };
+
     let resolved_top_layer = resolve_packages(default_resolver, top_layer)?;
 
     // if the original file contained anything, save a backup
