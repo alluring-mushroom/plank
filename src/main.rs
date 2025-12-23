@@ -173,7 +173,7 @@ fn main() -> Result<()> {
     let target_path = cli.path.unwrap_or("./".to_string());
     let output_path = Utf8PathBuf::from(cli.output.unwrap_or("Dockerfile".to_string()));
     let include_dockerfiles = cli.include.into_iter().map(Utf8PathBuf::from);
-    let artifact_dir = cli.artifact_dir.unwrap_or("build".to_string());
+    let artifact_dir = cli.artifact_dir.unwrap_or("".to_string());
     let artifact_dir = artifact_dir.as_str();
     let base_image = cli.base.as_str();
     let min_popularity = cli.min_popularity.unwrap_or(4);
@@ -426,7 +426,7 @@ fn main() -> Result<()> {
         for local in &layer.local_dependencies {
             writeln!(
                 out_file,
-                "copy --link --from={} /package/{a}/ ./{a}/",
+                "copy --link --from={} /package/{a} ./dependencies/{local}/{a}/",
                 local,
                 a = artifact_dir,
             )?;
