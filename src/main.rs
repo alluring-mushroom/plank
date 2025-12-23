@@ -238,10 +238,12 @@ fn main() -> Result<()> {
             acc.append(&mut list);
             acc
         })
-        .ok_or_else(|| eyre!("no popularity >= {}, cannot form top_layer", min_popularity))?
+        .ok_or_else(|| eyre!("no popularity >= {}, cannot form top_layer", min_popularity))
+        .with_note(|| format! {"Popularity list:\n{build_popularity:?}"})?
         .into_iter()
         .collect();
     log::debug!("Top layer will consist of {:?}", &top_layer);
+    log::debug!("Pulled from the following popularity list:\n{build_popularity:?}");
 
     // loop through packages to create layers, which requires separating local dependencies
     // (packages that are on this system) and system dependencies, which will be resolved using a
