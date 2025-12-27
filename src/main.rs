@@ -1,6 +1,6 @@
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
-use std::fs::File;
+use std::fs::{self, File};
 use std::io::Write;
 use std::sync::LazyLock;
 
@@ -16,7 +16,7 @@ use petgraph::{
     graphmap::GraphMap,
     visit::{Topo, Walker},
 };
-use quick_xml::de::from_str;
+use quick_xml::de::from_str as from_xml_str;
 use regex_lite::{Captures, Regex};
 use serde::{Deserialize, Serialize};
 
@@ -35,6 +35,7 @@ struct ColconPackage {
 }
 
 type Packages = BTreeMap<Name, Package>;
+type Layers = BTreeMap<Name, Layer>;
 /// records how often a package is a dependency
 type PackagePopularity = BTreeMap<Name, u32>;
 type Name = String;
@@ -42,8 +43,8 @@ type Name = String;
 #[derive(Debug)]
 struct Package {
     path: Utf8PathBuf,
-    build: Vec<String>,
-    run: Vec<String>,
+    build: Vec<Name>,
+    run: Vec<Name>,
 }
 
 impl Package {
@@ -61,10 +62,10 @@ impl Package {
 
 #[derive(Debug, Eq, PartialEq)]
 struct Layer {
-    name: String,
+    name: Name,
     path: Utf8PathBuf,
     system_dependencies: Dependencies,
-    local_dependencies: BTreeSet<String>,
+    local_dependencies: BTreeSet<Name>,
 }
 
 /// ensure correct ordering of layers such that they respect Docker rules
@@ -84,8 +85,8 @@ impl Ord for Layer {
 #[derive(Eq, PartialEq, Debug)]
 enum Dependencies {
     None,
-    Raw(BTreeSet<String>),
-    Resolved(Vec<String>),
+    Raw(BTreeSet<Name>),
+    Resolved(Vec<Name>),
 }
 
 /// resolves packages names to system names
@@ -119,7 +120,7 @@ fn generate_layers(
     ignore: BTreeSet<Name>,
     package_resolvers: &HashMap<&str, &str>,
     default_resolver: &str,
-) -> Result<BTreeMap<Name, Layer>> {
+) -> Result<Layers> {
     let mut layers = BTreeSet::new();
     for (name, package) in packages {
         let mut system_dependencies = BTreeSet::new();
@@ -279,8 +280,8 @@ fn main() -> Result<()> {
     {
         log::debug!("found package: {}", path);
 
-        let content = std::fs::read_to_string(&path)?;
-        let data: ColconPackage = from_str(&content)?;
+        let content = fs::read_to_string(&path)?;
+        let data: ColconPackage = from_xml_str(&content)?;
         let name = data.name.clone();
         let package = Package::from_colcon_package(
             path.strip_prefix(&target_path)?
@@ -315,7 +316,7 @@ fn main() -> Result<()> {
     };
 
     // make a single layer from popularity 4 and above inclusive
-    let top_layer: BTreeSet<String> = build_popularity
+    let top_layer: BTreeSet<Name> = build_popularity
         .range(min_popularity..)
         .into_iter()
         .map(|e| e.1.to_owned())
@@ -355,7 +356,7 @@ fn main() -> Result<()> {
     let top_layer =
         // we don't want to overwrite the top layer, as this is likely the most expensive to build.
         // instead, we compare to the last saved run, and use that without the correct flag being given
-        if let Some(contents) = std::fs::read(".plankconfig").ok() && !overwrite_top_layer {
+        if let Some(contents) = fs::read(".plankconfig").ok() && !overwrite_top_layer {
             let plankconfig: Plankconfig = serde_json::from_slice(&contents)?;
             if plankconfig.top_layer != top_layer {
                 log::warn!(
@@ -380,7 +381,7 @@ fn main() -> Result<()> {
     let resolved_top_layer = resolve_packages(default_resolver, top_layer)?;
 
     // if the original file contained anything, save a backup
-    if let Some(contents) = std::fs::read(&output_path).ok() {
+    if let Some(contents) = fs::read(&output_path).ok() {
         // we don't try and save the backup though
         let name =
             output_path.with_extension(output_path.extension().unwrap_or("").to_string() + "bak");
@@ -405,7 +406,7 @@ fn main() -> Result<()> {
                 "-".repeat(80)
             )?;
 
-            let dockerfile = std::fs::read(&dockerfile_name)
+            let dockerfile = fs::read(&dockerfile_name)
                 .wrap_err_with(|| {
                     format!("Can't read the specified Dockerfile: {}", &dockerfile_name)
                 })
