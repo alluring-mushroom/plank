@@ -34,7 +34,9 @@ struct ColconPackage {
     exec_depend: Option<Vec<String>>,
 }
 
-type Packages = HashMap<Name, Package>;
+type Packages = BTreeMap<Name, Package>;
+/// records how often a package is a dependency
+type PackagePopularity = BTreeMap<Name, u32>;
 type Name = String;
 
 #[derive(Debug)]
@@ -265,7 +267,7 @@ fn main() -> Result<()> {
     let overwrite_top_layer = cli.overwrite_top_layer;
 
     // construct map of dependencies to popularity of the dependency
-    let mut build_popularity = HashMap::<Name, u32>::new();
+    let mut build_popularity = PackagePopularity::new();
     // local packages don't need to be installed, so track them
     let mut local_packages = Packages::new();
 
@@ -298,9 +300,8 @@ fn main() -> Result<()> {
         local_packages.insert(name, package);
     }
 
-    // convert the HashMap to a BTreeMap, inverting the value and key so we can access ranges of
-    // popularity. This is assumed to be fine compared to initially constructing a BTreeMap, as
-    // we need to find the popularity first anyway, so reconstruction seems inevitable
+    // Invert the value and key so we can access ranges of popularity. This will allow constructing
+    // a layer that only consists of a certain popularity or higher
     let build_popularity = {
         let mut map = BTreeMap::<u32, Vec<String>>::new();
         for (pack, pop) in build_popularity
