@@ -269,7 +269,7 @@ fn main() -> Result<()> {
 
     // construct map of dependencies to popularity of the dependency
     let mut build_popularity = PackagePopularity::new();
-    // local packages don't need to be installed, so track them
+
     let mut local_packages = Packages::new();
 
     for path in Walk::new(&target_path)
@@ -373,6 +373,7 @@ fn main() -> Result<()> {
                 top_layer: top_layer.clone(),
             };
             out_file.write_all(serde_json::to_string(&data)?.as_bytes())?;
+            log::debug!("writing .plankconfig");
             out_file.commit()?;
 
             top_layer
