@@ -80,12 +80,11 @@ impl Ord for Layer {
     }
 }
 
-/// A dependency can either be a name as it is listed in the package, or the full system name as
-/// resolved by rosdep
+/// a layer has either no system dependencies or they are docker `run` command constructed to
+/// install those dependencies
 #[derive(Eq, PartialEq, Debug)]
 enum Dependencies {
     None,
-    Raw(BTreeSet<Name>),
     Resolved(Vec<Name>),
 }
 
@@ -112,78 +111,71 @@ where
     Ok(resolved.into_owned())
 }
 
-/// loop through packages to create layers, which requires separating local dependencies
+/// Create a Layer from a Package, which requires separating local dependencies
 /// (packages that are on this system) and system dependencies, which will be resolved using a
 /// resolver, whilst ignoring user specified packages
-fn generate_layers(
-    packages: &Packages,
+fn generate_layer(
+    layer_name: String,
+    package: Name,
+    path: Utf8PathBuf,
+    dependencies: &[Name],
+    local_packages: &Packages,
     ignore: BTreeSet<Name>,
     package_resolvers: &HashMap<&str, &str>,
     default_resolver: &str,
-) -> Result<Layers> {
-    let mut layers = BTreeSet::new();
-    for (name, package) in packages {
+) -> Result<Layer> {
+    log::debug!("Creating layer for `{package}` named `{layer_name}`");
+
+    let (system_dependencies, local_dependencies) = {
         let mut system_dependencies = BTreeSet::new();
         let mut local_dependencies = BTreeSet::new();
-
-        for dependency in &package.build {
-            if packages.contains_key(dependency.as_str()) {
+        for dependency in dependencies {
+            if local_packages.contains_key(dependency.as_str()) {
                 local_dependencies.insert(dependency.to_owned());
             } else if !ignore.contains(dependency.as_str()) {
                 system_dependencies.insert(dependency.to_owned());
             }
         }
-        log::debug!("Creating build layer for {}", &name);
-        layers.insert(Layer {
-            name: name.to_owned(),
-            path: package.path.clone(),
-            system_dependencies: if system_dependencies.len() > 0 {
-                Dependencies::Raw(system_dependencies)
-            } else {
-                Dependencies::None
-            },
-            local_dependencies,
-        });
-    }
 
-    // replace the list of dependencies with the resolver, a command to run that will install those
-    // dependencies
-    let layers = {
-        let mut new_layers = BTreeMap::new();
-        for mut layer in layers {
-            if let Dependencies::Raw(ref dependencies) = layer.system_dependencies {
-                let mut resolved = Vec::new();
-                let mut remaining = BTreeSet::new();
-                // exclude dependencies that are ignored by the user and in the top layer
-                let dependencies: BTreeSet<String> = dependencies - &ignore;
-                if dependencies.len() > 0 {
-                    for dependency in dependencies {
-                        if let Some(&command) = package_resolvers.get(dependency.as_str()) {
-                            if command.is_empty() {
-                                continue;
-                            };
-                            resolved.push(resolve_packages(command, std::iter::once(dependency))?);
-                        } else {
-                            remaining.insert(dependency.to_owned());
-                        }
-                    }
-                    resolved.push(
-                        resolve_packages(default_resolver, &remaining)
-                            .with_note(|| format!("parsing {}", layer.name))?,
-                    );
-                    layer.system_dependencies = Dependencies::Resolved(resolved);
-                } else {
-                    layer.system_dependencies = Dependencies::None;
-                }
-            }
-            log::debug!("resolve layer for {}", &layer.name);
-            new_layers.insert(layer.name.clone(), layer);
-        }
-
-        new_layers
+        (system_dependencies, local_dependencies)
     };
 
-    Ok(layers)
+    // replace the list of system dependencies with the resolver, a command to run that will install those
+    // dependencies. Some dependencies have a specific resolver just for them, the rest use the
+    // default resolver
+    let system_dependencies = {
+        if system_dependencies.len() > 0 {
+            let mut resolved = Vec::new();
+            let mut remaining = BTreeSet::new();
+            for dependency in system_dependencies {
+                if let Some(&command) = package_resolvers.get(dependency.as_str()) {
+                    if command.is_empty() {
+                        continue;
+                    };
+                    resolved.push(resolve_packages(command, std::iter::once(dependency))?);
+                } else {
+                    remaining.insert(dependency.to_owned());
+                }
+            }
+            resolved.push(
+                resolve_packages(default_resolver, &remaining)
+                    .with_note(|| format!("parsing {}", &layer_name))?,
+            );
+            Dependencies::Resolved(resolved)
+        } else {
+            Dependencies::None
+        }
+    };
+    log::debug!("resolve layer for {}", &layer_name);
+
+    let layer = Layer {
+        name: layer_name,
+        path: path,
+        system_dependencies,
+        local_dependencies,
+    };
+
+    Ok(layer)
 }
 
 #[derive(Parser)]
@@ -331,12 +323,26 @@ fn main() -> Result<()> {
     log::debug!("Top layer will consist of {:?}", &top_layer);
     log::debug!("Pulled from the following popularity list:\n{build_popularity:?}");
 
-    let layers = generate_layers(
-        &local_packages,
-        ignore.union(&top_layer).cloned().collect(),
-        &package_resolvers,
-        default_resolver,
-    )?;
+    let layers = {
+        let mut layers = Layers::new();
+        for (name, package) in &local_packages {
+            let layer = generate_layer(
+                name.clone(),
+                name.clone(),
+                package.path.clone(),
+                &package.build,
+                &local_packages,
+                top_layer.union(&ignore).into_iter().cloned().collect(),
+                &package_resolvers,
+                default_resolver,
+            )?;
+
+            layers.insert(name.clone(), layer);
+        }
+
+        layers
+    };
+
     // make layers into a graph for topological sorting
     let graph = {
         let mut graph = GraphMap::<&str, (), Directed>::new();
