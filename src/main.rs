@@ -63,7 +63,7 @@ impl Package {
 #[derive(Debug, Eq, PartialEq)]
 struct Layer {
     name: Name,
-    path: Utf8PathBuf,
+    source: Source,
     system_dependencies: Dependencies,
     local_dependencies: BTreeSet<Name>,
 }
@@ -78,6 +78,14 @@ impl Ord for Layer {
     fn cmp(&self, other: &Self) -> Ordering {
         self.name.cmp(&other.name)
     }
+}
+
+/// a layer either depends on a path, because it uses something from the file system, or a
+/// previous layer
+#[derive(Debug, Eq, PartialEq)]
+enum Source {
+    Path(Utf8PathBuf),
+    LayerName(String),
 }
 
 /// a layer has either no system dependencies or they are docker `run` command constructed to
@@ -117,7 +125,7 @@ where
 fn generate_layer(
     layer_name: String,
     package: Name,
-    path: Utf8PathBuf,
+    source: Source,
     dependencies: &[Name],
     local_packages: &Packages,
     ignore: BTreeSet<Name>,
@@ -170,7 +178,7 @@ fn generate_layer(
 
     let layer = Layer {
         name: layer_name,
-        path: path,
+        source,
         system_dependencies,
         local_dependencies,
     };
@@ -203,9 +211,13 @@ struct Cli {
     #[arg(long)]
     output: Option<String>,
 
-    /// the minimum popularity a package needs to be in the top layer. Defaults to 4
+    /// the minimum popularity a package needs to be in the build top layer. Defaults to 4
     #[arg(short = 'p', long)]
-    min_popularity: Option<u32>,
+    min_build_popularity: Option<u32>,
+
+    /// the minimum popularity a package needs to be in the exec top layer. Defaults to 4
+    #[arg(short = 'p', long)]
+    min_exec_popularity: Option<u32>,
 
     /// Command to convert a dependency name to an action, such as apt installing
     /// Any occurance of `{}` will be replaced with the dependencies for a single package
@@ -223,6 +235,10 @@ struct Cli {
     /// The command used to build the package
     #[arg(long)]
     build_command: String,
+
+    /// The command that is used to specify the entrypoint of an exec layer
+    #[arg(long)]
+    exec_command: String,
 
     /// dependencies to ignore if they are seen
     #[arg(long)]
@@ -245,7 +261,8 @@ fn main() -> Result<()> {
     let artifact_dir = cli.artifact_dir.unwrap_or("".to_string());
     let artifact_dir = artifact_dir.as_str();
     let base_image = cli.base.as_str();
-    let min_popularity = cli.min_popularity.unwrap_or(4);
+    let min_build_popularity = cli.min_build_popularity.unwrap_or(4);
+    let min_exec_popularity = cli.min_exec_popularity.unwrap_or(4);
     let default_resolver = cli.default_resolver.as_str();
     let package_resolvers = {
         let resolvers: Result<HashMap<&str, &str>, &str> = cli
@@ -256,11 +273,13 @@ fn main() -> Result<()> {
         resolvers.map_err(|e| eyre!("Couldn't process a --package argument: '{}'", e))?
     };
     let build_command = cli.build_command.as_str();
+    let exec_command = cli.exec_command.as_str();
     let ignore: BTreeSet<Name> = cli.ignore.into_iter().collect();
     let overwrite_top_layer = cli.overwrite_top_layer;
 
     // construct map of dependencies to popularity of the dependency
     let mut build_popularity = PackagePopularity::new();
+    let mut exec_popularity = PackagePopularity::new();
 
     let mut local_packages = Packages::new();
 
@@ -290,6 +309,13 @@ fn main() -> Result<()> {
                 .or_insert(1);
         }
 
+        for exec_dependency in package.exec.iter() {
+            exec_popularity
+                .entry(exec_dependency.to_owned())
+                .and_modify(|e| *e += 1)
+                .or_insert(1);
+        }
+
         local_packages.insert(name, package);
     }
 
@@ -307,32 +333,70 @@ fn main() -> Result<()> {
         map
     };
 
-    // make a single layer from popularity 4 and above inclusive
-    let top_layer: BTreeSet<Name> = build_popularity
-        .range(min_popularity..)
+    let exec_popularity = {
+        let mut map = BTreeMap::<u32, Vec<String>>::new();
+        for (pack, pop) in exec_popularity
+            .into_iter()
+            .filter(|e| !local_packages.contains_key(&e.0))
+        {
+            map.entry(pop).or_insert_with(|| Vec::new()).push(pack);
+        }
+
+        map
+    };
+
+    // make a single layer from the most popular packages. One for build time, one for run time
+    let build_top_layer: BTreeSet<Name> = build_popularity
+        .range(min_build_popularity..)
         .into_iter()
         .map(|e| e.1.to_owned())
         .reduce(|mut acc, mut list| {
             acc.append(&mut list);
             acc
         })
-        .ok_or_else(|| eyre!("no popularity >= {}, cannot form top_layer", min_popularity))
-        .with_note(|| format! {"Popularity list:\n{build_popularity:?}"})?
+        .ok_or_else(|| {
+            eyre!(
+                "no build popularity >= {}, cannot form build top_layer",
+                min_build_popularity
+            )
+        })
+        .with_note(|| format! {"Build Popularity list:\n{build_popularity:?}"})?
         .into_iter()
         .collect();
-    log::debug!("Top layer will consist of {:?}", &top_layer);
+    log::debug!("Build Top layer will consist of {:?}", &build_top_layer);
     log::debug!("Pulled from the following popularity list:\n{build_popularity:?}");
 
-    let layers = {
+    let exec_top_layer: BTreeSet<Name> = exec_popularity
+        .range(min_exec_popularity..)
+        .into_iter()
+        .map(|e| e.1.to_owned())
+        .reduce(|mut acc, mut list| {
+            acc.append(&mut list);
+            acc
+        })
+        .ok_or_else(|| {
+            eyre!("no exec popularity >= {min_exec_popularity}, cannot form exec top_layer")
+        })
+        .with_note(|| format! {"Exec Popularity list:\n{exec_popularity:?}"})?
+        .into_iter()
+        .collect();
+    log::debug!("Exec Top layer will consist of {:?}", &exec_top_layer);
+    log::debug!("Pulled from the following popularity list:\n{exec_popularity:?}");
+
+    let build_layers = {
         let mut layers = Layers::new();
         for (name, package) in &local_packages {
             let layer = generate_layer(
                 name.clone(),
                 name.clone(),
-                package.path.clone(),
+                Source::Path(package.path.clone()),
                 &package.build,
                 &local_packages,
-                top_layer.union(&ignore).into_iter().cloned().collect(),
+                build_top_layer
+                    .union(&ignore)
+                    .into_iter()
+                    .cloned()
+                    .collect(),
                 &package_resolvers,
                 default_resolver,
             )?;
@@ -343,10 +407,31 @@ fn main() -> Result<()> {
         layers
     };
 
+    let exec_layers = {
+        let mut layers = Layers::new();
+        for (name, package) in &local_packages {
+            let layer_name = format!("{}_exec", name.clone());
+            let layer = generate_layer(
+                layer_name.clone(),
+                name.clone(),
+                Source::LayerName(name.clone()),
+                &package.exec,
+                &local_packages,
+                exec_top_layer.union(&ignore).into_iter().cloned().collect(),
+                &package_resolvers,
+                default_resolver,
+            )?;
+
+            layers.insert(layer_name, layer);
+        }
+
+        layers
+    };
+
     // make layers into a graph for topological sorting
     let graph = {
         let mut graph = GraphMap::<&str, (), Directed>::new();
-        for (_, layer) in &layers {
+        for (_, layer) in &build_layers {
             for local in &layer.local_dependencies {
                 graph.add_edge(local.as_str(), layer.name.as_str(), ());
             }
@@ -355,16 +440,28 @@ fn main() -> Result<()> {
             log::debug!("adding {} to build graph", &layer.name);
         }
 
+        for (_, layer) in &exec_layers {
+            for local in &layer.local_dependencies {
+                graph.add_edge(local.as_str(), layer.name.as_str(), ());
+            }
+            if let Source::LayerName(layer_source) = &layer.source {
+                graph.add_edge(layer_source.as_str(), layer.name.as_str(), ());
+            }
+            graph.add_node(layer.name.as_str());
+
+            log::debug!("adding {} to exec graph", &layer.name);
+        }
+
         graph
     };
 
     // Begin building the Dockerfile
-    let top_layer =
+    let build_top_layer =
         // we don't want to overwrite the top layer, as this is likely the most expensive to build.
         // instead, we compare to the last saved run, and use that without the correct flag being given
         if let Some(contents) = fs::read(".plankconfig").ok() && !overwrite_top_layer {
             let plankconfig: Plankconfig = serde_json::from_slice(&contents)?;
-            if plankconfig.top_layer != top_layer {
+            if plankconfig.top_layer != build_top_layer {
                 log::warn!(
                     "The toplayer would be updated. This will lead to longer build times. Falling back to the last top layer"
                 );
@@ -376,16 +473,18 @@ fn main() -> Result<()> {
         } else {
             let mut out_file = AtomicWriteFile::options().open(".plankconfig")?;
             let data = Plankconfig {
-                top_layer: top_layer.clone(),
+                top_layer: build_top_layer.clone(),
             };
             out_file.write_all(serde_json::to_string(&data)?.as_bytes())?;
             log::debug!("writing .plankconfig");
             out_file.commit()?;
 
-            top_layer
+            build_top_layer
        };
 
-    let resolved_top_layer = resolve_packages(default_resolver, top_layer)?;
+    let resolved_build_top_layer = resolve_packages(default_resolver, build_top_layer)?;
+
+    let resolved_exec_top_layer = resolve_packages(default_resolver, exec_top_layer)?;
 
     // if the original file contained anything, save a backup
     if let Some(contents) = fs::read(&output_path).ok() {
@@ -429,16 +528,33 @@ fn main() -> Result<()> {
     }
 
     let build_base = "base";
+    let exec_base = "base_exec";
 
-    //beginning of dockerfile
+    // beginning of dockerfile
+    // build
     writeln!(out_file, "from {} as {}", base_image, build_base)?;
-    writeln!(out_file, "run {}", resolved_top_layer)?;
+    writeln!(out_file, "run {}", resolved_build_top_layer)?;
+    // exec
+    writeln!(out_file)?;
+    writeln!(out_file, "from {} as {}", base_image, exec_base)?;
+    writeln!(out_file, "run {}", resolved_exec_top_layer)?;
 
     // generate dockerfile with these layers
     let a = Topo::new(&graph);
     for name in a.iter(&graph) {
         log::debug!("adding {} to Dockerfile", &name);
-        let layer = &layers[name];
+        // let layer = &build_layers[name];
+        let build_layer = build_layers.get(name);
+        let exec_layer = exec_layers.get(name);
+        // .ok_or()
+        let layer = match (build_layer, exec_layer) {
+            (None, None) => Err(eyre!("layer, `{name}`, should be in either build or exec")),
+            (Some(_), Some(_)) => Err(eyre!(
+                "a layer, `{name}`, cannot be in both the build and exec layer sets"
+            )),
+            (Some(layer), _) => Ok(layer),
+            (_, Some(layer)) => Ok(layer),
+        }?;
         writeln!(out_file)?;
         writeln!(out_file, "from {} as {}", build_base, layer.name)?;
         writeln!(out_file, "workdir /package")?;
@@ -455,8 +571,16 @@ fn main() -> Result<()> {
                 a = artifact_dir,
             )?;
         }
-        writeln!(out_file, "copy {} /package/{}", layer.path, layer.name)?;
-        writeln!(out_file, "run {}", build_command)?;
+        match &layer.source {
+            Source::Path(path) => {
+                writeln!(out_file, "copy {} /package/{}", path, layer.name)?;
+                writeln!(out_file, "run {}", build_command)?;
+            }
+            Source::LayerName(name) => {
+                writeln!(out_file, "copy --link --from={name} /package/ ./{name}/")?;
+                writeln!(out_file, "entrypoint {}", exec_command)?;
+            }
+        };
     }
 
     out_file.commit()?;
