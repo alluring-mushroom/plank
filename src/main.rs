@@ -44,19 +44,19 @@ type Name = String;
 struct Package {
     path: Utf8PathBuf,
     build: Vec<Name>,
-    run: Vec<Name>,
+    exec: Vec<Name>,
 }
 
 impl Package {
     fn from_colcon_package(path: Utf8PathBuf, colcon_package: ColconPackage) -> Self {
         let mut build = colcon_package.build_depend.unwrap_or_default();
-        let mut run = colcon_package.exec_depend.unwrap_or_default();
+        let mut exec = colcon_package.exec_depend.unwrap_or_default();
         if let Some(depend) = colcon_package.depend {
             build.extend(depend.clone());
-            run.extend(depend);
+            exec.extend(depend);
         }
 
-        Self { path, build, run }
+        Self { path, build, exec }
     }
 }
 
