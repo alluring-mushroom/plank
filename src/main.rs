@@ -96,8 +96,8 @@ enum Dependencies {
     Resolved(Vec<Name>),
 }
 
-/// resolves packages names to system names
-fn resolve_packages<'a, I, T>(resolver: &str, args: I) -> Result<String>
+/// resolves templated commands
+fn resolve_commands<'a, I, T>(resolver: &str, args: I) -> Result<String>
 where
     I: std::iter::IntoIterator<Item = T>,
     T: AsRef<str>,
@@ -160,13 +160,13 @@ fn generate_layer(
                     if command.is_empty() {
                         continue;
                     };
-                    resolved.push(resolve_packages(command, std::iter::once(dependency))?);
+                    resolved.push(resolve_commands(command, std::iter::once(dependency))?);
                 } else {
                     remaining.insert(dependency.to_owned());
                 }
             }
             resolved.push(
-                resolve_packages(default_resolver, &remaining)
+                resolve_commands(default_resolver, &remaining)
                     .with_note(|| format!("parsing {}", &layer_name))?,
             );
             Dependencies::Resolved(resolved)
@@ -220,23 +220,26 @@ struct Cli {
     min_exec_popularity: Option<u32>,
 
     /// Command to convert a dependency name to an action, such as apt installing
-    /// Any occurance of `{}` will be replaced with the dependencies for a single package
+    /// Any occurrence of `{}` will be replaced with the dependencies for a single package
     /// use either `\` or `#` to escape this, eg. `echo \{}` will result in `echo {}`
     #[arg(short = 'r', long)]
     default_resolver: String,
 
     /// a command to resolve a single package. It is of the form `regex:command`. If command is
     /// a blank string, the package is simply not resolved, if it is non-empty it is treated
-    /// the same as `default_resolver`, but for this specific package, including subsitutions. See
+    /// the same as `default_resolver`, but for this specific package, including substitutions. See
     /// `default_resolver` for more information
     #[arg(long)]
     package: Vec<String>,
 
-    /// The command used to build the package
+    /// The command used to build the package.
+    /// Any occurrence of `{}` will be replaced with the path, in Docker, of the package to be built
     #[arg(long)]
     build_command: String,
 
     /// The command that is used to specify the entrypoint of an exec layer
+    /// Any occurrence of `{}` will be replaced with the name of the package that the exec layer is
+    /// based on
     #[arg(long)]
     exec_command: String,
 
@@ -482,9 +485,9 @@ fn main() -> Result<()> {
             build_top_layer
        };
 
-    let resolved_build_top_layer = resolve_packages(default_resolver, build_top_layer)?;
+    let resolved_build_top_layer = resolve_commands(default_resolver, build_top_layer)?;
 
-    let resolved_exec_top_layer = resolve_packages(default_resolver, exec_top_layer)?;
+    let resolved_exec_top_layer = resolve_commands(default_resolver, exec_top_layer)?;
 
     // if the original file contained anything, save a backup
     if let Some(contents) = fs::read(&output_path).ok() {
@@ -547,16 +550,16 @@ fn main() -> Result<()> {
         let build_layer = build_layers.get(name);
         let exec_layer = exec_layers.get(name);
         // .ok_or()
-        let layer = match (build_layer, exec_layer) {
+        let (base, layer) = match (build_layer, exec_layer) {
             (None, None) => Err(eyre!("layer, `{name}`, should be in either build or exec")),
             (Some(_), Some(_)) => Err(eyre!(
                 "a layer, `{name}`, cannot be in both the build and exec layer sets"
             )),
-            (Some(layer), _) => Ok(layer),
-            (_, Some(layer)) => Ok(layer),
+            (Some(layer), _) => Ok((build_base, layer)),
+            (_, Some(layer)) => Ok((exec_base, layer)),
         }?;
         writeln!(out_file)?;
-        writeln!(out_file, "from {} as {}", build_base, layer.name)?;
+        writeln!(out_file, "from {} as {}", base, layer.name)?;
         writeln!(out_file, "workdir /package")?;
         if let Dependencies::Resolved(commands) = &layer.system_dependencies {
             for command in commands.iter().rev() {
@@ -573,12 +576,22 @@ fn main() -> Result<()> {
         }
         match &layer.source {
             Source::Path(path) => {
-                writeln!(out_file, "copy {} /package/{}", path, layer.name)?;
-                writeln!(out_file, "run {}", build_command)?;
+                let layer_path = format!("/package/{}", layer.name);
+                writeln!(out_file, "copy {path} {layer_path}")?;
+                let cmd = resolve_commands(build_command, std::iter::once(layer_path))?;
+                writeln!(out_file, "run {}", cmd)?;
             }
             Source::LayerName(name) => {
                 writeln!(out_file, "copy --link --from={name} /package/ ./{name}/")?;
-                writeln!(out_file, "entrypoint {}", exec_command)?;
+                // resolve the command so that it references the correct layer, and convert it to
+                // docker array form
+                let mut cmd = resolve_commands(exec_command, std::iter::once(name.as_str()))?
+                    .split_whitespace()
+                    .collect::<Vec<&str>>()
+                    .join("\", \"");
+                cmd.push_str("\"]");
+                cmd.insert_str(0, "[\"");
+                writeln!(out_file, "entrypoint {}", cmd)?;
             }
         };
     }
