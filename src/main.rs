@@ -243,6 +243,12 @@ struct Cli {
     #[arg(long)]
     exec_command: String,
 
+    /// An arbitrary command that will be inserted after dependency copies/commands but before the
+    /// exec command. Can be specified more than once, for each line of Dockerfle
+    /// Any occurrence of `{}` will be replaced with the name of the package that the layer is for
+    #[arg(long)]
+    extra_exec_command: Vec<String>,
+
     /// dependencies to ignore if they are seen
     #[arg(long)]
     ignore: Vec<String>,
@@ -277,6 +283,7 @@ fn main() -> Result<()> {
     };
     let build_command = cli.build_command.as_str();
     let exec_command = cli.exec_command.as_str();
+    let extra_exec_commands = cli.extra_exec_command;
     let ignore: BTreeSet<Name> = cli.ignore.into_iter().collect();
     let overwrite_top_layer = cli.overwrite_top_layer;
 
@@ -583,6 +590,13 @@ fn main() -> Result<()> {
             }
             Source::LayerName(name) => {
                 writeln!(out_file, "copy --link --from={name} /package/ ./{name}/")?;
+                for extra_command in &extra_exec_commands {
+                    writeln!(
+                        out_file,
+                        "{}",
+                        resolve_commands(extra_command, std::iter::once(name.as_str()))?
+                    )?;
+                }
                 // resolve the command so that it references the correct layer, and convert it to
                 // docker array form
                 let mut cmd = resolve_commands(exec_command, std::iter::once(name.as_str()))?
