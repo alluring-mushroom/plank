@@ -186,6 +186,28 @@ fn generate_layer(
     Ok(layer)
 }
 
+/// returns the resolved dependencies as `run` commands and the local dependencies as `copy`
+/// commands
+fn expand_dependencies(layer: &Layer, artifact_dir: &str) -> (BTreeSet<String>, BTreeSet<String>) {
+    let mut system_dependencies = BTreeSet::new();
+    let mut local_dependencies = BTreeSet::new();
+
+    if let Dependencies::Resolved(commands) = &layer.system_dependencies {
+        for command in commands.iter().rev() {
+            system_dependencies.insert(format!("run {}", command));
+        }
+    }
+    for local in &layer.local_dependencies {
+        local_dependencies.insert(format!(
+            "copy --link --from={} /package/{a} ./dependencies/{local}/{a}",
+            local,
+            a = artifact_dir,
+        ));
+    }
+
+    (system_dependencies, local_dependencies)
+}
+
 #[derive(Parser)]
 #[command(version, about, long_about = None)]
 struct Cli {
@@ -565,30 +587,68 @@ fn main() -> Result<()> {
             (Some(layer), _) => Ok((build_base, layer)),
             (_, Some(layer)) => Ok((exec_base, layer)),
         }?;
+
         writeln!(out_file)?;
         writeln!(out_file, "from {} as {}", base, layer.name)?;
         writeln!(out_file, "workdir /package")?;
-        if let Dependencies::Resolved(commands) = &layer.system_dependencies {
-            for command in commands.iter().rev() {
-                writeln!(out_file, "run {}", command)?;
-            }
-        }
-        for local in &layer.local_dependencies {
-            writeln!(
-                out_file,
-                "copy --link --from={} /package/{a} ./dependencies/{local}/{a}/",
-                local,
-                a = artifact_dir,
-            )?;
-        }
+
         match &layer.source {
             Source::Path(path) => {
                 let layer_path = format!("/package/{}", layer.name);
                 writeln!(out_file, "copy {path} {layer_path}")?;
+                let (system_dependencies, local_dependencies) =
+                    expand_dependencies(layer, artifact_dir);
+                for dep in system_dependencies.iter().chain(local_dependencies.iter()) {
+                    writeln!(out_file, "{}", dep)?;
+                }
                 let cmd = resolve_commands(build_command, std::iter::once(layer_path))?;
                 writeln!(out_file, "run {}", cmd)?;
             }
             Source::LayerName(name) => {
+                // exec layers need to recursively add their exec dependencies
+                let (mut system_dependencies, mut local_dependencies) =
+                    expand_dependencies(layer, artifact_dir);
+                // the dependencies we are currently iterating over. We know these are exec dependencies by
+                // construction
+                let mut dependencies = layer.local_dependencies.clone();
+                let mut visited = BTreeSet::new();
+                // we have indeed visited this current layer already, recording this allows
+                // circular exec dependencies to be resolved
+                visited.insert(layer.name.clone());
+                while let Some(dep) = dependencies.pop_last() {
+                    if visited.contains(&dep) {
+                        continue;
+                    }
+                    // the exec system dependencies are listed correctly in exec layers, which are
+                    // the most important for this exercise. The generated local dependencies are
+                    // copied from build_layers (since they don't have `_exec` appended) but that
+                    // is fine, as the exec layers don't really exist for file content, more for
+                    // the system dependencies
+                    let new_layer = &build_layers[dep.as_str()];
+                    //
+                    // let new_layer = &exec_layers[&format!("{dep}_exec")];
+                    let (new_system_dependencies, new_local_dependencies) =
+                        expand_dependencies(new_layer, artifact_dir);
+                    system_dependencies.extend(new_system_dependencies);
+                    local_dependencies.extend(new_local_dependencies);
+                    dependencies.extend(new_layer.local_dependencies.clone());
+                    visited.insert(dep);
+                }
+                // FIXME: These should maybe all be resolved together so that there is one apt
+                // install, but that would require other changes, and having them be separate could
+                // be beneficial, as for an exec package it is often more likely to be editing the
+                // immediate dependencies, and so less to reinstall??
+                // The other issue is this method will lead to repeated attempts ti install the
+                // same dependencies, as they are resolved at an earlier point
+                for dep in system_dependencies {
+                    writeln!(out_file, "{}", dep)?;
+                }
+                writeln!(out_file)?;
+                for dep in local_dependencies {
+                    writeln!(out_file, "{}", dep)?;
+                }
+
+                // copy the actual package this layer depends upon
                 writeln!(out_file, "copy --link --from={name} /package/ ./{name}/")?;
                 for extra_command in &extra_exec_commands {
                     writeln!(
