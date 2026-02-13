@@ -23,7 +23,8 @@ use serde::{Deserialize, Serialize};
 
 #[derive(Serialize, Deserialize, Debug)]
 struct Plankconfig {
-    pub top_layer: BTreeSet<Name>,
+    pub build_top_layer: BTreeSet<Name>,
+    pub exec_top_layer: BTreeSet<Name>,
 }
 
 /// a colcon `package.xml` description
@@ -527,30 +528,28 @@ fn main() -> Result<()> {
     };
 
     // Begin building the Dockerfile
-    let build_top_layer =
+    let (build_top_layer, exec_top_layer) =
         // we don't want to overwrite the top layer, as this is likely the most expensive to build.
         // instead, we compare to the last saved run, and use that without the correct flag being given
         if let Some(contents) = fs::read(".plankconfig").ok() && !overwrite_top_layer {
             let plankconfig: Plankconfig = serde_json::from_slice(&contents)?;
-            if plankconfig.top_layer != build_top_layer {
+            if plankconfig.build_top_layer != build_top_layer || plankconfig.exec_top_layer != exec_top_layer {
                 log::warn!(
-                    "The toplayer would be updated. This will lead to longer build times. Falling back to the last top layer"
-                );
-                log::warn!(
-                    "To overwrite this, use the flag `--overwrite-top-layer`. To see what has changed, run in debug mode"
+                    "The top layers would be updated. This will lead to longer build times. Falling back to the definitions in .plankconfig\n\
+                     To overwrite this, use the flag `--overwrite-top-layer`. To see what has changed, run in debug mode"
                 );
             }
-            plankconfig.top_layer
+            (plankconfig.build_top_layer, plankconfig.exec_top_layer)
         } else {
             let mut out_file = AtomicWriteFile::options().open(".plankconfig")?;
             let data = Plankconfig {
-                top_layer: build_top_layer.clone(),
+                build_top_layer: build_top_layer.clone(),
+                exec_top_layer: exec_top_layer.clone(),
             };
             out_file.write_all(serde_json::to_string(&data)?.as_bytes())?;
-            log::debug!("writing .plankconfig");
+            log::debug!("writing new .plankconfig");
             out_file.commit()?;
-
-            build_top_layer
+            (build_top_layer, exec_top_layer)
        };
 
     let resolved_build_top_layer = resolve_commands(default_resolver, build_top_layer)?;
