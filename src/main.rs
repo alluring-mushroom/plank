@@ -39,6 +39,8 @@ type Packages = BTreeMap<Name, Package>;
 type Layers = BTreeMap<Name, Layer>;
 /// records how often a package is a dependency
 type PackagePopularity = BTreeMap<Name, u32>;
+// Doesn't use Name or similar for efficiency. The strings are split a whole bunch
+type Resolvers<'a, 'b> = HashMap<&'a str, &'b str>;
 
 /// The name of a local dependency or system dependency
 #[derive(Debug, PartialEq, PartialOrd, Eq, Ord, Clone, Serialize, Deserialize, Hash)]
@@ -72,8 +74,8 @@ impl Name {
 #[derive(Debug)]
 struct Package {
     path: Utf8PathBuf,
-    build: Vec<Name>,
-    exec: Vec<Name>,
+    build: BTreeSet<Name>,
+    exec: BTreeSet<Name>,
 }
 
 impl Package {
@@ -97,8 +99,7 @@ impl Package {
 struct Layer {
     name: Name,
     source: Source,
-    system_dependencies: Dependencies,
-    local_dependencies: BTreeSet<Name>,
+    dependencies: Dependencies,
 }
 
 /// ensure correct ordering of layers such that they respect Docker rules
@@ -123,9 +124,9 @@ enum Source {
 
 /// a layer has either no system dependencies or a list of packages
 #[derive(Eq, PartialEq, Debug)]
-enum Dependencies {
-    None,
-    Resolved(Vec<String>),
+struct Dependencies {
+    system_dependencies: BTreeSet<Name>,
+    local_dependencies: BTreeSet<Name>,
 }
 
 /// resolves templated commands
@@ -158,11 +159,9 @@ fn generate_layer(
     layer_name: Name,
     package: Name,
     source: Source,
-    dependencies: &[Name],
+    dependencies: &BTreeSet<Name>,
     local_packages: &Packages,
-    ignore: BTreeSet<Name>,
-    package_resolvers: &HashMap<&str, &str>,
-    default_resolver: &str,
+    ignore: &BTreeSet<Name>,
 ) -> Result<Layer> {
     log::debug!("Creating layer for `{package}` named `{layer_name}`");
 
@@ -180,39 +179,13 @@ fn generate_layer(
         (system_dependencies, local_dependencies)
     };
 
-    // replace the list of system dependencies with the resolver, a command to run that will install those
-    // dependencies. Some dependencies have a specific resolver just for them, the rest use the
-    // default resolver
-    let system_dependencies = {
-        if system_dependencies.len() > 0 {
-            let mut resolved = Vec::new();
-            let mut remaining = BTreeSet::new();
-            for dependency in system_dependencies {
-                if let Some(&command) = package_resolvers.get(dependency.as_str()) {
-                    if command.is_empty() {
-                        continue;
-                    };
-                    resolved.push(resolve_commands(command, std::iter::once(dependency))?);
-                } else {
-                    remaining.insert(dependency.to_owned());
-                }
-            }
-            resolved.push(
-                resolve_commands(default_resolver, &remaining)
-                    .with_note(|| format!("parsing {}", &layer_name))?,
-            );
-            Dependencies::Resolved(resolved)
-        } else {
-            Dependencies::None
-        }
-    };
-    log::debug!("resolve layer for {}", &layer_name);
-
     let layer = Layer {
         name: layer_name,
         source,
-        system_dependencies,
-        local_dependencies,
+        dependencies: Dependencies {
+            system_dependencies,
+            local_dependencies,
+        },
     };
 
     Ok(layer)
@@ -220,24 +193,62 @@ fn generate_layer(
 
 /// returns the resolved dependencies as `run` commands and the local dependencies as `copy`
 /// commands
-fn expand_dependencies(layer: &Layer, artifact_dir: &str) -> (BTreeSet<String>, BTreeSet<String>) {
-    let mut system_dependencies = BTreeSet::new();
-    let mut local_dependencies = BTreeSet::new();
-
-    if let Dependencies::Resolved(commands) = &layer.system_dependencies {
-        for command in commands.iter().rev() {
-            system_dependencies.insert(format!("run {}", command));
+fn expand_dependencies(
+    dependencies: &Dependencies,
+    artifact_dir: &str,
+    package_resolvers: &Resolvers,
+    default_resolver: &str,
+) -> Result<(BTreeSet<String>, BTreeSet<String>)> {
+    // replace the list of system dependencies with the resolver, a command to run that will install those
+    // dependencies. Some dependencies have a specific resolver just for them, the rest use the
+    // default resolver
+    let resolved_commands = {
+        if dependencies.system_dependencies.len() > 0 {
+            let mut resolved = Vec::new();
+            let mut remaining = BTreeSet::new();
+            for dependency in &dependencies.system_dependencies {
+                if let Some(&command) = package_resolvers.get(&dependency.as_str()) {
+                    if command.is_empty() {
+                        continue;
+                    };
+                    resolved.push(
+                        resolve_commands(command, std::iter::once(dependency))
+                            .with_note(|| format!("resolving {dependency}"))?,
+                    );
+                } else {
+                    remaining.insert(dependency.to_owned());
+                }
+            }
+            resolved.push(
+                resolve_commands(default_resolver, &remaining)
+                    .with_note(|| format!("resolving remaining dependencies {:?}", remaining))?,
+            );
+            resolved
+        } else {
+            vec![]
         }
-    }
-    for local in &layer.local_dependencies {
-        local_dependencies.insert(format!(
-            "copy --link --from={} /package/{a} ./dependencies/{local}/{a}",
-            local,
-            a = artifact_dir,
-        ));
-    }
+    };
 
-    (system_dependencies, local_dependencies)
+    // wrap in the correct Dockerfile syntax
+    let system_commands = resolved_commands
+        .into_iter()
+        .rev()
+        .map(|command| format!("run {}", command))
+        .collect();
+
+    let local_commands = dependencies
+        .local_dependencies
+        .iter()
+        .map(|local| {
+            format!(
+                "copy --link --from={} /package/{a} ./dependencies/{local}/{a}",
+                local,
+                a = artifact_dir
+            )
+        })
+        .collect();
+
+    Ok((system_commands, local_commands))
 }
 
 #[derive(Parser)]
@@ -456,13 +467,11 @@ fn main() -> Result<()> {
                 Source::Path(package.path.clone()),
                 &package.build,
                 &local_packages,
-                build_top_layer
+                &build_top_layer
                     .union(&ignore)
                     .into_iter()
                     .cloned()
                     .collect(),
-                &package_resolvers,
-                default_resolver,
             )?;
 
             layers.insert(name.clone(), layer);
@@ -481,9 +490,7 @@ fn main() -> Result<()> {
                 Source::LayerName(name.clone()),
                 &package.exec,
                 &local_packages,
-                exec_top_layer.union(&ignore).into_iter().cloned().collect(),
-                &package_resolvers,
-                default_resolver,
+                &exec_top_layer.union(&ignore).into_iter().cloned().collect(),
             )?;
 
             layers.insert(layer_name, layer);
@@ -496,7 +503,7 @@ fn main() -> Result<()> {
     let graph = {
         let mut graph = GraphMap::<&Name, (), Directed>::new();
         for (_, layer) in &build_layers {
-            for local in &layer.local_dependencies {
+            for local in &layer.dependencies.local_dependencies {
                 graph.add_edge(local, &layer.name, ());
             }
             graph.add_node(&layer.name);
@@ -505,7 +512,7 @@ fn main() -> Result<()> {
         }
 
         for (_, layer) in &exec_layers {
-            for local in &layer.local_dependencies {
+            for local in &layer.dependencies.local_dependencies {
                 graph.add_edge(local, &layer.name, ());
             }
             if let Source::LayerName(layer_source) = &layer.source {
@@ -624,12 +631,17 @@ fn main() -> Result<()> {
         writeln!(out_file, "from {} as {}", base, layer.name)?;
         writeln!(out_file, "workdir /package")?;
 
+        log::debug!("resolve layer for {}", &layer.name);
         match &layer.source {
             Source::Path(path) => {
                 let layer_path = format!("/package/{}", layer.name);
                 writeln!(out_file, "copy {path} {layer_path}")?;
-                let (system_dependencies, local_dependencies) =
-                    expand_dependencies(layer, artifact_dir);
+                let (system_dependencies, local_dependencies) = expand_dependencies(
+                    &layer.dependencies,
+                    artifact_dir,
+                    &package_resolvers,
+                    default_resolver,
+                )?;
                 for dep in system_dependencies.iter().chain(local_dependencies.iter()) {
                     writeln!(out_file, "{}", dep)?;
                 }
@@ -638,47 +650,54 @@ fn main() -> Result<()> {
             }
             Source::LayerName(name) => {
                 // exec layers need to recursively add their exec dependencies
-                let (mut system_dependencies, mut local_dependencies) =
-                    expand_dependencies(layer, artifact_dir);
+                let mut system_dependencies = layer.dependencies.system_dependencies.clone();
+                let mut local_dependencies = layer.dependencies.local_dependencies.clone();
                 // the dependencies we are currently iterating over. We know these are exec dependencies by
-                // construction
-                let mut dependencies = layer.local_dependencies.clone();
+                // construction.
+                // This is used as a queue
+                let mut dependencies = layer.dependencies.local_dependencies.clone();
                 let mut visited = BTreeSet::new();
                 // we have indeed visited this current layer already, recording this allows
                 // circular exec dependencies to be resolved
                 visited.insert(layer.name.clone());
 
+                // FIXME: I could probably use the dependency graph to do this without worrying
+                // about double visiting etc.
                 // recursively go through dependencies of this exec layer and install all system
                 // dependencies
                 while let Some(dep) = dependencies.pop_last() {
                     if visited.contains(&dep) {
                         continue;
                     }
-                    // the exec system dependencies are listed correctly in exec layers, which are
-                    // the most important for this exercise. The generated local dependencies are
-                    // copied from build_layers (since they don't have `_exec` appended) but that
-                    // is fine, as the exec layers don't really exist for file content, more for
-                    // the system dependencies
-                    let new_layer = &build_layers[&dep];
+                    let next_layer = &exec_layers[&Name(format!("{dep}_exec"))];
+                    log::debug!("{} depends on {}", layer.name, next_layer.name);
+                    // each exec layer is intended to be independent due to installing their
+                    // system dependencies, so each will have all system dependencies of all of
+                    // their local dependencies recursively
+                    system_dependencies.extend(next_layer.dependencies.system_dependencies.clone());
+                    local_dependencies.extend(next_layer.dependencies.local_dependencies.clone());
 
-                    let (new_system_dependencies, new_local_dependencies) =
-                        expand_dependencies(new_layer, artifact_dir);
-                    system_dependencies.extend(new_system_dependencies);
-                    local_dependencies.extend(new_local_dependencies);
-                    dependencies.extend(new_layer.local_dependencies.clone());
+                    // we pull the next dependencies to iterate over from the local dependencies
+                    dependencies.extend(next_layer.dependencies.local_dependencies.clone());
+
                     visited.insert(dep);
                 }
-                // FIXME: These should maybe all be resolved together so that there is one apt
-                // install, but that would require other changes, and having them be separate could
-                // be beneficial, as for an exec package it is often more likely to be editing the
-                // immediate dependencies, and so less to reinstall??
-                // The other issue is this method will lead to repeated attempts ti install the
-                // same dependencies, as they are resolved at an earlier point
-                for dep in system_dependencies {
+                // expand and resolve all of these dependencies
+                let (system_command, local_commands) = expand_dependencies(
+                    &Dependencies {
+                        system_dependencies,
+                        local_dependencies,
+                        // local_dependencies: layer.dependencies.local_dependencies.clone(),
+                    },
+                    artifact_dir,
+                    &package_resolvers,
+                    default_resolver,
+                )?;
+                for dep in system_command {
                     writeln!(out_file, "{}", dep)?;
                 }
                 writeln!(out_file)?;
-                for dep in local_dependencies {
+                for dep in local_commands {
                     writeln!(out_file, "{}", dep)?;
                 }
 
