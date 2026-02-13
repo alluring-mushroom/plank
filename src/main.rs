@@ -1,6 +1,6 @@
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
-use std::fmt::Display;
+use std::fmt::{Debug, Display};
 use std::fs::{self, File};
 use std::io::Write;
 use std::sync::LazyLock;
@@ -44,7 +44,7 @@ type PackagePopularity = BTreeMap<Name, u32>;
 type Resolvers<'a, 'b> = HashMap<&'a str, &'b str>;
 
 /// The name of a local dependency or system dependency
-#[derive(Debug, PartialEq, PartialOrd, Eq, Ord, Clone, Serialize, Deserialize, Hash)]
+#[derive(PartialEq, PartialOrd, Eq, Ord, Clone, Serialize, Deserialize, Hash)]
 #[repr(transparent)]
 struct Name(String);
 
@@ -56,13 +56,20 @@ impl From<String> for Name {
 
 impl Display for Name {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        self.0.fmt(f)
+        std::fmt::Display::fmt(&self.0, f)
     }
 }
 
 impl AsRef<str> for Name {
     fn as_ref(&self) -> &str {
         self.0.as_ref()
+    }
+}
+
+// Name is mostly redundant when printing
+impl Debug for Name {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        std::fmt::Debug::fmt(&self.0, f)
     }
 }
 
@@ -440,8 +447,9 @@ fn main() -> Result<()> {
         .into_iter()
         .collect();
     log::debug!(
-        "Build Top layer will consist of {build_top_layer:?}\n\
-        Pulled from the following popularity list:\n{build_popularity:?}"
+        "Build Top layer will consist of {build_top_layer:#?}\n\
+        Pulled from the following popularity list, \
+        {min_build_popularity} and above (n_dependents -> packages):\n{build_popularity:#?}"
     );
 
     let exec_top_layer: BTreeSet<Name> = exec_popularity
@@ -459,8 +467,9 @@ fn main() -> Result<()> {
         .into_iter()
         .collect();
     log::debug!(
-        "Exec Top layer will consist of {exec_top_layer:?}\n\
-        Pulled from the following popularity list:\n{exec_popularity:?}"
+        "Exec Top layer will consist of {exec_top_layer:#?}\n\
+        Pulled from the following popularity list \
+        {min_exec_popularity} and above (n_dependents -> packages):\n{exec_popularity:#?}"
     );
 
     let (build_top_layer, exec_top_layer) =
