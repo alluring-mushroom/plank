@@ -164,7 +164,7 @@ fn generate_layer(
     local_packages: &Packages,
     ignore: &BTreeSet<Name>,
 ) -> Result<Layer> {
-    log::debug!("Creating layer for `{package}` named `{layer_name}`");
+    log::trace!("Creating layer for `{package}` named `{layer_name}`");
 
     let (system_dependencies, local_dependencies) = {
         let mut system_dependencies = BTreeSet::new();
@@ -365,7 +365,7 @@ fn main() -> Result<()> {
         .filter_map(|p| Utf8Path::from_path(p.path()).map(Utf8Path::to_path_buf))
         .filter(|p| p.ends_with("package.xml"))
     {
-        log::debug!("found package: {}", path);
+        log::trace!("found package: {}", path);
 
         let content = fs::read_to_string(&path)?;
         let data: ColconPackage = from_xml_str(&content)?;
@@ -439,8 +439,10 @@ fn main() -> Result<()> {
         .with_note(|| format! {"Build Popularity list:\n{build_popularity:?}"})?
         .into_iter()
         .collect();
-    log::debug!("Build Top layer will consist of {:?}", &build_top_layer);
-    log::debug!("Pulled from the following popularity list:\n{build_popularity:?}");
+    log::debug!(
+        "Build Top layer will consist of {build_top_layer:?}\n\
+        Pulled from the following popularity list:\n{build_popularity:?}"
+    );
 
     let exec_top_layer: BTreeSet<Name> = exec_popularity
         .range(min_exec_popularity..)
@@ -456,8 +458,10 @@ fn main() -> Result<()> {
         .with_note(|| format! {"Exec Popularity list:\n{exec_popularity:?}"})?
         .into_iter()
         .collect();
-    log::debug!("Exec Top layer will consist of {:?}", &exec_top_layer);
-    log::debug!("Pulled from the following popularity list:\n{exec_popularity:?}");
+    log::debug!(
+        "Exec Top layer will consist of {exec_top_layer:?}\n\
+        Pulled from the following popularity list:\n{exec_popularity:?}"
+    );
 
     let (build_top_layer, exec_top_layer) =
         // we don't want to overwrite the top layer, as this is likely the most expensive to build.
@@ -533,7 +537,7 @@ fn main() -> Result<()> {
             }
             graph.add_node(&layer.name);
 
-            log::debug!("adding {} to build graph", &layer.name);
+            log::trace!("adding {} to build graph", &layer.name);
         }
 
         for (_, layer) in &exec_layers {
@@ -545,7 +549,7 @@ fn main() -> Result<()> {
             }
             graph.add_node(&layer.name);
 
-            log::debug!("adding {} to exec graph", &layer.name);
+            log::trace!("adding {} to exec graph", &layer.name);
         }
 
         graph
@@ -612,7 +616,7 @@ fn main() -> Result<()> {
     // generate dockerfile with these layers
     let a = Topo::new(&graph);
     for name in a.iter(&graph) {
-        log::debug!("adding {} to Dockerfile", &name);
+        log::trace!("adding {} to Dockerfile", &name);
         // let layer = &build_layers[name];
         let build_layer = build_layers.get(name);
         let exec_layer = exec_layers.get(name);
@@ -630,7 +634,7 @@ fn main() -> Result<()> {
         writeln!(out_file, "from {} as {}", base, layer.name)?;
         writeln!(out_file, "workdir /package")?;
 
-        log::debug!("resolve layer for {}", &layer.name);
+        log::trace!("resolve layer for {}", &layer.name);
         match &layer.source {
             Source::Path(path) => {
                 let layer_path = format!("/package/{}", layer.name);
@@ -669,7 +673,7 @@ fn main() -> Result<()> {
                         continue;
                     }
                     let next_layer = &exec_layers[&Name(format!("{dep}_exec"))];
-                    log::debug!("{} depends on {}", layer.name, next_layer.name);
+                    log::trace!("{} depends on {}", layer.name, next_layer.name);
                     // each exec layer is intended to be independent due to installing their
                     // system dependencies, so each will have all system dependencies of all of
                     // their local dependencies recursively
