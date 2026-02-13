@@ -459,6 +459,30 @@ fn main() -> Result<()> {
     log::debug!("Exec Top layer will consist of {:?}", &exec_top_layer);
     log::debug!("Pulled from the following popularity list:\n{exec_popularity:?}");
 
+    let (build_top_layer, exec_top_layer) =
+        // we don't want to overwrite the top layer, as this is likely the most expensive to build.
+        // instead, we compare to the last saved run, and use that without the correct flag being given
+        if let Some(contents) = fs::read(".plankconfig").ok() && !overwrite_top_layer {
+            let plankconfig: Plankconfig = serde_json::from_slice(&contents)?;
+            if plankconfig.build_top_layer != build_top_layer || plankconfig.exec_top_layer != exec_top_layer {
+                log::warn!(
+                    "The top layers would be updated. This will lead to longer build times. Falling back to the definitions in .plankconfig\n\
+                     To overwrite this, use the flag `--overwrite-top-layer`. To see what has changed, run in debug mode"
+                );
+            }
+            (plankconfig.build_top_layer, plankconfig.exec_top_layer)
+        } else {
+            let mut out_file = AtomicWriteFile::options().open(".plankconfig")?;
+            let data = Plankconfig {
+                build_top_layer: build_top_layer.clone(),
+                exec_top_layer: exec_top_layer.clone(),
+            };
+            out_file.write_all(serde_json::to_string(&data)?.as_bytes())?;
+            log::debug!("writing new .plankconfig");
+            out_file.commit()?;
+            (build_top_layer, exec_top_layer)
+       };
+
     let build_layers = {
         let mut layers = Layers::new();
         for (name, package) in &local_packages {
@@ -528,32 +552,7 @@ fn main() -> Result<()> {
     };
 
     // Begin building the Dockerfile
-    let (build_top_layer, exec_top_layer) =
-        // we don't want to overwrite the top layer, as this is likely the most expensive to build.
-        // instead, we compare to the last saved run, and use that without the correct flag being given
-        if let Some(contents) = fs::read(".plankconfig").ok() && !overwrite_top_layer {
-            let plankconfig: Plankconfig = serde_json::from_slice(&contents)?;
-            if plankconfig.build_top_layer != build_top_layer || plankconfig.exec_top_layer != exec_top_layer {
-                log::warn!(
-                    "The top layers would be updated. This will lead to longer build times. Falling back to the definitions in .plankconfig\n\
-                     To overwrite this, use the flag `--overwrite-top-layer`. To see what has changed, run in debug mode"
-                );
-            }
-            (plankconfig.build_top_layer, plankconfig.exec_top_layer)
-        } else {
-            let mut out_file = AtomicWriteFile::options().open(".plankconfig")?;
-            let data = Plankconfig {
-                build_top_layer: build_top_layer.clone(),
-                exec_top_layer: exec_top_layer.clone(),
-            };
-            out_file.write_all(serde_json::to_string(&data)?.as_bytes())?;
-            log::debug!("writing new .plankconfig");
-            out_file.commit()?;
-            (build_top_layer, exec_top_layer)
-       };
-
     let resolved_build_top_layer = resolve_commands(default_resolver, build_top_layer)?;
-
     let resolved_exec_top_layer = resolve_commands(default_resolver, exec_top_layer)?;
 
     // if the original file contained anything, save a backup
