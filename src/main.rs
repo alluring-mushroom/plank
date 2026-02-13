@@ -1,5 +1,6 @@
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::fmt::Display;
 use std::fs::{self, File};
 use std::io::Write;
 use std::sync::LazyLock;
@@ -22,7 +23,7 @@ use serde::{Deserialize, Serialize};
 
 #[derive(Serialize, Deserialize, Debug)]
 struct Plankconfig {
-    pub top_layer: BTreeSet<String>,
+    pub top_layer: BTreeSet<Name>,
 }
 
 /// a colcon `package.xml` description
@@ -38,7 +39,35 @@ type Packages = BTreeMap<Name, Package>;
 type Layers = BTreeMap<Name, Layer>;
 /// records how often a package is a dependency
 type PackagePopularity = BTreeMap<Name, u32>;
-type Name = String;
+
+/// The name of a local dependency or system dependency
+#[derive(Debug, PartialEq, PartialOrd, Eq, Ord, Clone, Serialize, Deserialize, Hash)]
+#[repr(transparent)]
+struct Name(String);
+
+impl From<String> for Name {
+    fn from(value: String) -> Self {
+        Name(value)
+    }
+}
+
+impl Display for Name {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.0.fmt(f)
+    }
+}
+
+impl AsRef<str> for Name {
+    fn as_ref(&self) -> &str {
+        self.0.as_ref()
+    }
+}
+
+impl Name {
+    fn as_str(&self) -> &str {
+        self.as_ref()
+    }
+}
 
 #[derive(Debug)]
 struct Package {
@@ -56,7 +85,11 @@ impl Package {
             exec.extend(depend);
         }
 
-        Self { path, build, exec }
+        Self {
+            path,
+            build: build.into_iter().map(Into::into).collect(),
+            exec: exec.into_iter().map(Into::into).collect(),
+        }
     }
 }
 
@@ -85,15 +118,14 @@ impl Ord for Layer {
 #[derive(Debug, Eq, PartialEq)]
 enum Source {
     Path(Utf8PathBuf),
-    LayerName(String),
+    LayerName(Name),
 }
 
-/// a layer has either no system dependencies or they are docker `run` command constructed to
-/// install those dependencies
+/// a layer has either no system dependencies or a list of packages
 #[derive(Eq, PartialEq, Debug)]
 enum Dependencies {
     None,
-    Resolved(Vec<Name>),
+    Resolved(Vec<String>),
 }
 
 /// resolves templated commands
@@ -123,7 +155,7 @@ where
 /// (packages that are on this system) and system dependencies, which will be resolved using a
 /// resolver, whilst ignoring user specified packages
 fn generate_layer(
-    layer_name: String,
+    layer_name: Name,
     package: Name,
     source: Source,
     dependencies: &[Name],
@@ -138,9 +170,9 @@ fn generate_layer(
         let mut system_dependencies = BTreeSet::new();
         let mut local_dependencies = BTreeSet::new();
         for dependency in dependencies {
-            if local_packages.contains_key(dependency.as_str()) {
+            if local_packages.contains_key(&dependency) {
                 local_dependencies.insert(dependency.to_owned());
-            } else if !ignore.contains(dependency.as_str()) {
+            } else if !ignore.contains(&dependency) {
                 system_dependencies.insert(dependency.to_owned());
             }
         }
@@ -306,7 +338,7 @@ fn main() -> Result<()> {
     let build_command = cli.build_command.as_str();
     let exec_command = cli.exec_command.as_str();
     let extra_exec_commands = cli.extra_exec_command;
-    let ignore: BTreeSet<Name> = cli.ignore.into_iter().collect();
+    let ignore: BTreeSet<Name> = cli.ignore.into_iter().map(Into::into).collect();
     let overwrite_top_layer = cli.overwrite_top_layer;
 
     // construct map of dependencies to popularity of the dependency
@@ -348,13 +380,13 @@ fn main() -> Result<()> {
                 .or_insert(1);
         }
 
-        local_packages.insert(name, package);
+        local_packages.insert(name.into(), package);
     }
 
     // Invert the value and key so we can access ranges of popularity. This will allow constructing
     // a layer that only consists of a certain popularity or higher
     let build_popularity = {
-        let mut map = BTreeMap::<u32, Vec<String>>::new();
+        let mut map = BTreeMap::<u32, Vec<Name>>::new();
         for (pack, pop) in build_popularity
             .into_iter()
             .filter(|e| !local_packages.contains_key(&e.0))
@@ -366,7 +398,7 @@ fn main() -> Result<()> {
     };
 
     let exec_popularity = {
-        let mut map = BTreeMap::<u32, Vec<String>>::new();
+        let mut map = BTreeMap::<u32, Vec<Name>>::new();
         for (pack, pop) in exec_popularity
             .into_iter()
             .filter(|e| !local_packages.contains_key(&e.0))
@@ -442,7 +474,7 @@ fn main() -> Result<()> {
     let exec_layers = {
         let mut layers = Layers::new();
         for (name, package) in &local_packages {
-            let layer_name = format!("{}_exec", name.clone());
+            let layer_name: Name = format!("{}_exec", name.clone()).into();
             let layer = generate_layer(
                 layer_name.clone(),
                 name.clone(),
@@ -462,24 +494,24 @@ fn main() -> Result<()> {
 
     // make layers into a graph for topological sorting
     let graph = {
-        let mut graph = GraphMap::<&str, (), Directed>::new();
+        let mut graph = GraphMap::<&Name, (), Directed>::new();
         for (_, layer) in &build_layers {
             for local in &layer.local_dependencies {
-                graph.add_edge(local.as_str(), layer.name.as_str(), ());
+                graph.add_edge(local, &layer.name, ());
             }
-            graph.add_node(layer.name.as_str());
+            graph.add_node(&layer.name);
 
             log::debug!("adding {} to build graph", &layer.name);
         }
 
         for (_, layer) in &exec_layers {
             for local in &layer.local_dependencies {
-                graph.add_edge(local.as_str(), layer.name.as_str(), ());
+                graph.add_edge(local, &layer.name, ());
             }
             if let Source::LayerName(layer_source) = &layer.source {
-                graph.add_edge(layer_source.as_str(), layer.name.as_str(), ());
+                graph.add_edge(layer_source, &layer.name, ());
             }
-            graph.add_node(layer.name.as_str());
+            graph.add_node(&layer.name);
 
             log::debug!("adding {} to exec graph", &layer.name);
         }
@@ -615,6 +647,9 @@ fn main() -> Result<()> {
                 // we have indeed visited this current layer already, recording this allows
                 // circular exec dependencies to be resolved
                 visited.insert(layer.name.clone());
+
+                // recursively go through dependencies of this exec layer and install all system
+                // dependencies
                 while let Some(dep) = dependencies.pop_last() {
                     if visited.contains(&dep) {
                         continue;
@@ -624,9 +659,8 @@ fn main() -> Result<()> {
                     // copied from build_layers (since they don't have `_exec` appended) but that
                     // is fine, as the exec layers don't really exist for file content, more for
                     // the system dependencies
-                    let new_layer = &build_layers[dep.as_str()];
-                    //
-                    // let new_layer = &exec_layers[&format!("{dep}_exec")];
+                    let new_layer = &build_layers[&dep];
+
                     let (new_system_dependencies, new_local_dependencies) =
                         expand_dependencies(new_layer, artifact_dir);
                     system_dependencies.extend(new_system_dependencies);
