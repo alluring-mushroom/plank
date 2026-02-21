@@ -138,7 +138,7 @@ struct Dependencies {
 }
 
 /// resolves templated commands
-fn resolve_commands<'a, I, T>(resolver: &str, args: I) -> Result<String>
+fn resolve_commands<I, T>(resolver: &str, args: I) -> Result<String>
 where
     I: std::iter::IntoIterator<Item = T>,
     T: AsRef<str>,
@@ -177,9 +177,9 @@ fn generate_layer(
         let mut system_dependencies = BTreeSet::new();
         let mut local_dependencies = BTreeSet::new();
         for dependency in dependencies {
-            if local_packages.contains_key(&dependency) {
+            if local_packages.contains_key(dependency) {
                 local_dependencies.insert(dependency.to_owned());
-            } else if !ignore.contains(&dependency) {
+            } else if !ignore.contains(dependency) {
                 system_dependencies.insert(dependency.to_owned());
             }
         }
@@ -211,7 +211,7 @@ fn expand_dependencies(
     // dependencies. Some dependencies have a specific resolver just for them, the rest use the
     // default resolver
     let resolved_commands = {
-        if dependencies.system_dependencies.len() > 0 {
+        if !dependencies.system_dependencies.is_empty() {
             let mut resolved = Vec::new();
             let mut remaining = BTreeSet::new();
             for dependency in &dependencies.system_dependencies {
@@ -367,7 +367,6 @@ fn main() -> Result<()> {
     let mut local_packages = Packages::new();
 
     for path in Walk::new(&target_path)
-        .into_iter()
         .filter_map(|e| e.ok())
         .filter_map(|p| Utf8Path::from_path(p.path()).map(Utf8Path::to_path_buf))
         .filter(|p| p.ends_with("package.xml"))
@@ -406,11 +405,11 @@ fn main() -> Result<()> {
     // a layer that only consists of a certain popularity or higher
     let build_popularity = {
         let mut map = BTreeMap::<u32, Vec<Name>>::new();
-        for (pack, pop) in build_popularity
+        for (package, popularity) in build_popularity
             .into_iter()
             .filter(|e| !local_packages.contains_key(&e.0))
         {
-            map.entry(pop).or_insert_with(|| Vec::new()).push(pack);
+            map.entry(popularity).or_default().push(package);
         }
 
         map
@@ -418,11 +417,11 @@ fn main() -> Result<()> {
 
     let exec_popularity = {
         let mut map = BTreeMap::<u32, Vec<Name>>::new();
-        for (pack, pop) in exec_popularity
+        for (package, popularity) in exec_popularity
             .into_iter()
             .filter(|e| !local_packages.contains_key(&e.0))
         {
-            map.entry(pop).or_insert_with(|| Vec::new()).push(pack);
+            map.entry(popularity).or_default().push(package);
         }
 
         map
@@ -431,7 +430,6 @@ fn main() -> Result<()> {
     // make a single layer from the most popular packages. One for build time, one for run time
     let build_top_layer: BTreeSet<Name> = build_popularity
         .range(min_build_popularity..)
-        .into_iter()
         .map(|e| e.1.to_owned())
         .reduce(|mut acc, mut list| {
             acc.append(&mut list);
@@ -454,7 +452,6 @@ fn main() -> Result<()> {
 
     let exec_top_layer: BTreeSet<Name> = exec_popularity
         .range(min_exec_popularity..)
-        .into_iter()
         .map(|e| e.1.to_owned())
         .reduce(|mut acc, mut list| {
             acc.append(&mut list);
@@ -505,11 +502,7 @@ fn main() -> Result<()> {
                 Source::Path(package.path.clone()),
                 &package.build,
                 &local_packages,
-                &build_top_layer
-                    .union(&ignore)
-                    .into_iter()
-                    .cloned()
-                    .collect(),
+                &build_top_layer.union(&ignore).cloned().collect(),
             )?;
 
             layers.insert(name.clone(), layer);
@@ -528,7 +521,7 @@ fn main() -> Result<()> {
                 Source::LayerName(name.clone()),
                 &package.exec,
                 &local_packages,
-                &exec_top_layer.union(&ignore).into_iter().cloned().collect(),
+                &exec_top_layer.union(&ignore).cloned().collect(),
             )?;
 
             layers.insert(layer_name, layer);
@@ -540,7 +533,7 @@ fn main() -> Result<()> {
     // make layers into a graph for topological sorting
     let graph = {
         let mut graph = GraphMap::<&Name, (), Directed>::new();
-        for (_, layer) in &build_layers {
+        for layer in build_layers.values() {
             for local in &layer.dependencies.local_dependencies {
                 graph.add_edge(local, &layer.name, ());
             }
@@ -549,7 +542,7 @@ fn main() -> Result<()> {
             log::trace!("adding {} to build graph", &layer.name);
         }
 
-        for (_, layer) in &exec_layers {
+        for layer in exec_layers.values() {
             for local in &layer.dependencies.local_dependencies {
                 graph.add_edge(local, &layer.name, ());
             }
@@ -569,7 +562,7 @@ fn main() -> Result<()> {
     let resolved_exec_top_layer = resolve_commands(default_resolver, exec_top_layer)?;
 
     // if the original file contained anything, save a backup
-    if let Some(contents) = fs::read(&output_path).ok() {
+    if let Ok(contents) = fs::read(&output_path) {
         // we don't try and save the backup though
         let path =
             output_path.with_extension(output_path.extension().unwrap_or("").to_string() + "bak");
