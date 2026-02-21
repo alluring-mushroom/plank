@@ -1,0 +1,26 @@
+name: build_release
+on:
+  push:
+    tags:
+      - "v[0-9]+.[0-9]+.[0-9]+"
+env:
+  CARGO_TERM_COLOR: always
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v6
+    - name: Build
+      run: cargo build --release --verbose\
+    - name: Get the release version from the tag
+      shell: bash
+      run: echo "VERSION=${GITHUB_REF#refs/tags/}" >> $GITHUB_ENV
+    - name: Archive
+      shell: bash
+      run: |
+        binary_name=plank
+        dirname="$binary_name-${{ env.VERSION }}"
+        mkdir "$dirname"
+        mv "target/${{ matrix.target }}/release/$binary_name" "$dirname"
+        tar -czf "$dirname.tar.gz" "$dirname"
+        echo "ASSET=$dirname.tar.gz" >> $GITHUB_ENV
