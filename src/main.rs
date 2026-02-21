@@ -695,7 +695,6 @@ fn main() -> Result<()> {
                 for dep in system_command {
                     writeln!(out_file, "{}", dep)?;
                 }
-                writeln!(out_file)?;
                 for dep in local_commands {
                     writeln!(out_file, "{}", dep)?;
                 }
