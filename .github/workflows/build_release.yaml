@@ -1,4 +1,6 @@
 name: build_release
+permissions:
+  contents: write
 on:
   push:
     tags:
@@ -24,3 +26,8 @@ jobs:
         mv "target/${{ matrix.target }}/release/$binary_name" "$dirname"
         tar -czf "$dirname.tar.gz" "$dirname"
         echo "ASSET=$dirname.tar.gz" >> $GITHUB_ENV
+    - name: Release
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      run: >-
+        gh release create ${{ github.ref_name }} ${{ env.ASSET }} --title "Release ${{ github.ref_name }}"
