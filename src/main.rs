@@ -254,8 +254,55 @@ fn expand_dependencies(
 #[derive(Parser)]
 #[command(version, about, long_about = None)]
 struct Cli {
+    /// the base image that each layer will use
+    #[arg(short = 'i', long)]
+    base_image: String,
+
+    /// Command to convert a dependency name to an action, such as apt installing
+    /// Any occurrence of `{}` will be replaced with the dependencies for a single package
+    /// use either `\` or `#` to escape this, eg. `echo \{}` will result in `echo {}`
+    #[arg(short = 'r', long)]
+    default_resolver: String,
+
+    /// The command used to build a package.
+    /// Any occurrence of `{}` will be replaced with the path, in Docker, of the package to be built
+    #[arg(short = 'b', long)]
+    build_command: String,
+
+    /// the minimum popularity a package needs to be in the build top layer. Defaults to 4
+    #[arg(long)]
+    build_min_popularity: Option<u32>,
+
+    /// The command that is used to specify the entrypoint of an exec layer. If unspecified,the
+    /// entrypoint will come from the base layer
+    /// Any occurrence of `{}` will be replaced with the name of the package that the exec layer is
+    /// based on
+    #[arg(short = 'e', long)]
+    exec_command: Option<String>,
+
+    /// the minimum popularity a package needs to be in the exec top layer. Defaults to 4
+    #[arg(long)]
+    exec_min_popularity: Option<u32>,
+
+    /// An arbitrary command that will be inserted after dependency copies/commands but before the
+    /// exec command. Can be specified more than once, for each line of Dockerfle
+    /// Any occurrence of `{}` will be replaced with the name of the package that the layer is for
+    #[arg(long)]
+    extra_exec_command: Vec<String>,
+
+    /// a command to resolve a single package. It is of the form `regex:command`. If command is
+    /// a blank string, the package is simply not resolved, if it is non-empty it is treated
+    /// the same as `default_resolver`, but for this specific package, including substitutions. See
+    /// `default_resolver` for more information
+    #[arg(long)]
+    package: Vec<String>,
+
     /// Path to search for packages. Defaults to CWD
     path: Option<String>,
+
+    /// the location to write the output to
+    #[arg(long)]
+    output: Option<String>,
 
     /// Embed the contents of another Dockerfile in this one. It will be as if they are
     /// concatenated, with the options specified here coming before the content this program
@@ -268,57 +315,11 @@ struct Cli {
     #[arg(long)]
     artifact_dir: Option<String>,
 
-    /// the base image that each layer will use
-    #[arg(long)]
-    base: String,
-
-    /// the location to write the output to
-    #[arg(long)]
-    output: Option<String>,
-
-    /// the minimum popularity a package needs to be in the build top layer. Defaults to 4
-    #[arg(short = 'p', long)]
-    min_build_popularity: Option<u32>,
-
-    /// the minimum popularity a package needs to be in the exec top layer. Defaults to 4
-    #[arg(short = 'p', long)]
-    min_exec_popularity: Option<u32>,
-
-    /// Command to convert a dependency name to an action, such as apt installing
-    /// Any occurrence of `{}` will be replaced with the dependencies for a single package
-    /// use either `\` or `#` to escape this, eg. `echo \{}` will result in `echo {}`
-    #[arg(short = 'r', long)]
-    default_resolver: String,
-
-    /// a command to resolve a single package. It is of the form `regex:command`. If command is
-    /// a blank string, the package is simply not resolved, if it is non-empty it is treated
-    /// the same as `default_resolver`, but for this specific package, including substitutions. See
-    /// `default_resolver` for more information
-    #[arg(long)]
-    package: Vec<String>,
-
-    /// The command used to build the package.
-    /// Any occurrence of `{}` will be replaced with the path, in Docker, of the package to be built
-    #[arg(long)]
-    build_command: String,
-
-    /// The command that is used to specify the entrypoint of an exec layer
-    /// Any occurrence of `{}` will be replaced with the name of the package that the exec layer is
-    /// based on
-    #[arg(long)]
-    exec_command: String,
-
-    /// An arbitrary command that will be inserted after dependency copies/commands but before the
-    /// exec command. Can be specified more than once, for each line of Dockerfle
-    /// Any occurrence of `{}` will be replaced with the name of the package that the layer is for
-    #[arg(long)]
-    extra_exec_command: Vec<String>,
-
     /// dependencies to ignore if they are seen
     #[arg(long)]
     ignore: Vec<String>,
 
-    /// whether to overwrite the top_layer of the dockerimage
+    /// whether to overwrite the build_top_layer and exec_top_layer of the dockerimage
     #[arg(long)]
     overwrite_top_layer: bool,
 }
@@ -334,9 +335,9 @@ fn main() -> Result<()> {
     let include_dockerfiles = cli.include.into_iter().map(Utf8PathBuf::from);
     let artifact_dir = cli.artifact_dir.unwrap_or_default();
     let artifact_dir = artifact_dir.as_str();
-    let base_image = cli.base.as_str();
-    let min_build_popularity = cli.min_build_popularity.unwrap_or(4);
-    let min_exec_popularity = cli.min_exec_popularity.unwrap_or(4);
+    let base_image = cli.base_image.as_str();
+    let min_build_popularity = cli.build_min_popularity.unwrap_or(4);
+    let min_exec_popularity = cli.exec_min_popularity.unwrap_or(4);
     let default_resolver = cli.default_resolver.as_str();
     let package_resolvers = {
         let resolvers: Result<HashMap<&str, &str>, &str> = cli
@@ -347,7 +348,7 @@ fn main() -> Result<()> {
         resolvers.map_err(|e| eyre!("Couldn't process a --package argument: '{}'", e))?
     };
     let build_command = cli.build_command.as_str();
-    let exec_command = cli.exec_command.as_str();
+    let exec_command = cli.exec_command;
     let extra_exec_commands = cli.extra_exec_command;
     let ignore: BTreeSet<Name> = cli.ignore.into_iter().map(Into::into).collect();
     let overwrite_top_layer = cli.overwrite_top_layer;
@@ -708,13 +709,16 @@ fn main() -> Result<()> {
                 }
                 // resolve the command so that it references the correct layer, and convert it to
                 // docker array form
-                let mut cmd = resolve_commands(exec_command, std::iter::once(name.as_str()))
-                    .split_whitespace()
-                    .collect::<Vec<&str>>()
-                    .join("\", \"");
-                cmd.push_str("\"]");
-                cmd.insert_str(0, "[\"");
-                writeln!(out_file, "entrypoint {}", cmd)?;
+                if let Some(command) = &exec_command {
+                    let mut cmd =
+                        resolve_commands(command.as_str(), std::iter::once(name.as_str()))
+                            .split_whitespace()
+                            .collect::<Vec<&str>>()
+                            .join("\", \"");
+                    cmd.push_str("\"]");
+                    cmd.insert_str(0, "[\"");
+                    writeln!(out_file, "entrypoint {}", cmd)?;
+                }
             }
         }
     }
