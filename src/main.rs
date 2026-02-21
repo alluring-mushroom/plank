@@ -187,16 +187,14 @@ fn generate_layer(
         (system_dependencies, local_dependencies)
     };
 
-    let layer = Layer {
+    Layer {
         name: layer_name,
         source,
         dependencies: Dependencies {
             system_dependencies,
             local_dependencies,
         },
-    };
-
-    layer
+    }
 }
 
 /// returns the resolved dependencies as `run` commands and the local dependencies as `copy`
@@ -218,7 +216,7 @@ fn expand_dependencies(
                 if let Some(&command) = package_resolvers.get(&dependency.as_str()) {
                     if command.is_empty() {
                         continue;
-                    };
+                    }
                     resolved.push(resolve_commands(command, std::iter::once(dependency)));
                 } else {
                     remaining.insert(dependency.to_owned());
@@ -334,7 +332,7 @@ fn main() -> Result<()> {
     let target_path = cli.path.unwrap_or("./".to_string());
     let output_path = Utf8PathBuf::from(cli.output.unwrap_or("Dockerfile".to_string()));
     let include_dockerfiles = cli.include.into_iter().map(Utf8PathBuf::from);
-    let artifact_dir = cli.artifact_dir.unwrap_or("".to_string());
+    let artifact_dir = cli.artifact_dir.unwrap_or_default();
     let artifact_dir = artifact_dir.as_str();
     let base_image = cli.base.as_str();
     let min_build_popularity = cli.min_build_popularity.unwrap_or(4);
@@ -344,7 +342,7 @@ fn main() -> Result<()> {
         let resolvers: Result<HashMap<&str, &str>, &str> = cli
             .package
             .iter()
-            .map(|s| s.split_once(":").ok_or(s.as_str()))
+            .map(|s| s.split_once(':').ok_or(s.as_str()))
             .collect();
         resolvers.map_err(|e| eyre!("Couldn't process a --package argument: '{}'", e))?
     };
@@ -361,7 +359,7 @@ fn main() -> Result<()> {
     let mut local_packages = Packages::new();
 
     for path in Walk::new(&target_path)
-        .filter_map(|e| e.ok())
+        .filter_map(Result::ok)
         .filter_map(|p| Utf8Path::from_path(p.path()).map(Utf8Path::to_path_buf))
         .filter(|p| p.ends_with("package.xml"))
     {
@@ -378,14 +376,14 @@ fn main() -> Result<()> {
             data,
         );
 
-        for build_dependency in package.build.iter() {
+        for build_dependency in &package.build {
             build_popularity
                 .entry(build_dependency.to_owned())
                 .and_modify(|e| *e += 1)
                 .or_insert(1);
         }
 
-        for exec_dependency in package.exec.iter() {
+        for exec_dependency in &package.exec {
             exec_popularity
                 .entry(exec_dependency.to_owned())
                 .and_modify(|e| *e += 1)
@@ -718,7 +716,7 @@ fn main() -> Result<()> {
                 cmd.insert_str(0, "[\"");
                 writeln!(out_file, "entrypoint {}", cmd)?;
             }
-        };
+        }
     }
 
     out_file.commit()?;
