@@ -138,7 +138,7 @@ struct Dependencies {
 }
 
 /// resolves templated commands
-fn resolve_commands<I, T>(resolver: &str, args: I) -> Result<String>
+fn resolve_commands<I, T>(resolver: &str, args: I) -> String
 where
     I: std::iter::IntoIterator<Item = T>,
     T: AsRef<str>,
@@ -157,7 +157,7 @@ where
         other => format!("{}{}", other.map(|v| v.as_str()).unwrap_or(""), replacement),
     });
 
-    Ok(resolved.into_owned())
+    resolved.into_owned()
 }
 
 /// Create a Layer from a Package, which requires separating local dependencies
@@ -170,7 +170,7 @@ fn generate_layer(
     dependencies: &BTreeSet<Name>,
     local_packages: &Packages,
     ignore: &BTreeSet<Name>,
-) -> Result<Layer> {
+) -> Layer {
     log::trace!("Creating layer for `{package}` named `{layer_name}`");
 
     let (system_dependencies, local_dependencies) = {
@@ -196,7 +196,7 @@ fn generate_layer(
         },
     };
 
-    Ok(layer)
+    layer
 }
 
 /// returns the resolved dependencies as `run` commands and the local dependencies as `copy`
@@ -206,7 +206,7 @@ fn expand_dependencies(
     artifact_dir: &str,
     package_resolvers: &Resolvers,
     default_resolver: &str,
-) -> Result<(BTreeSet<String>, BTreeSet<String>)> {
+) -> (BTreeSet<String>, BTreeSet<String>) {
     // replace the list of system dependencies with the resolver, a command to run that will install those
     // dependencies. Some dependencies have a specific resolver just for them, the rest use the
     // default resolver
@@ -219,18 +219,12 @@ fn expand_dependencies(
                     if command.is_empty() {
                         continue;
                     };
-                    resolved.push(
-                        resolve_commands(command, std::iter::once(dependency))
-                            .with_note(|| format!("resolving {dependency}"))?,
-                    );
+                    resolved.push(resolve_commands(command, std::iter::once(dependency)));
                 } else {
                     remaining.insert(dependency.to_owned());
                 }
             }
-            resolved.push(
-                resolve_commands(default_resolver, &remaining)
-                    .with_note(|| format!("resolving remaining dependencies {:?}", remaining))?,
-            );
+            resolved.push(resolve_commands(default_resolver, &remaining));
             resolved
         } else {
             vec![]
@@ -256,7 +250,7 @@ fn expand_dependencies(
         })
         .collect();
 
-    Ok((system_commands, local_commands))
+    (system_commands, local_commands)
 }
 
 #[derive(Parser)]
@@ -503,7 +497,7 @@ fn main() -> Result<()> {
                 &package.build,
                 &local_packages,
                 &build_top_layer.union(&ignore).cloned().collect(),
-            )?;
+            );
 
             layers.insert(name.clone(), layer);
         }
@@ -522,7 +516,7 @@ fn main() -> Result<()> {
                 &package.exec,
                 &local_packages,
                 &exec_top_layer.union(&ignore).cloned().collect(),
-            )?;
+            );
 
             layers.insert(layer_name, layer);
         }
@@ -558,8 +552,8 @@ fn main() -> Result<()> {
     };
 
     // Begin building the Dockerfile
-    let resolved_build_top_layer = resolve_commands(default_resolver, build_top_layer)?;
-    let resolved_exec_top_layer = resolve_commands(default_resolver, exec_top_layer)?;
+    let resolved_build_top_layer = resolve_commands(default_resolver, build_top_layer);
+    let resolved_exec_top_layer = resolve_commands(default_resolver, exec_top_layer);
 
     // if the original file contained anything, save a backup
     if let Ok(contents) = fs::read(&output_path) {
@@ -646,11 +640,11 @@ fn main() -> Result<()> {
                     artifact_dir,
                     &package_resolvers,
                     default_resolver,
-                )?;
+                );
                 for dep in system_dependencies.iter().chain(local_dependencies.iter()) {
                     writeln!(out_file, "{}", dep)?;
                 }
-                let cmd = resolve_commands(build_command, std::iter::once(layer_path))?;
+                let cmd = resolve_commands(build_command, std::iter::once(layer_path));
                 writeln!(out_file, "run {}", cmd)?;
             }
             Source::LayerName(name) => {
@@ -697,7 +691,7 @@ fn main() -> Result<()> {
                     artifact_dir,
                     &package_resolvers,
                     default_resolver,
-                )?;
+                );
                 for dep in system_command {
                     writeln!(out_file, "{}", dep)?;
                 }
@@ -712,12 +706,12 @@ fn main() -> Result<()> {
                     writeln!(
                         out_file,
                         "{}",
-                        resolve_commands(extra_command, std::iter::once(name.as_str()))?
+                        resolve_commands(extra_command, std::iter::once(name.as_str()))
                     )?;
                 }
                 // resolve the command so that it references the correct layer, and convert it to
                 // docker array form
-                let mut cmd = resolve_commands(exec_command, std::iter::once(name.as_str()))?
+                let mut cmd = resolve_commands(exec_command, std::iter::once(name.as_str()))
                     .split_whitespace()
                     .collect::<Vec<&str>>()
                     .join("\", \"");
