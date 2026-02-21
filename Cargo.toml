@@ -2,6 +2,12 @@
 name = "plank"
 version = "0.1.0"
 edition = "2024"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/alluring-mushroom/plank"
+readme = "README.md"
+description = "A tool to generate the layers of a Dockerfile from many packages defined by package.xml files"
+keywords = ["ros2", "build", "docker"]
+categories = ["development-tools", "command-line-utilities"]
 
 [dependencies]
 atomic-write-file = "0.2.3"
