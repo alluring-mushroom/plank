@@ -254,9 +254,13 @@ fn expand_dependencies(
 #[derive(Parser)]
 #[command(version, about, long_about = None)]
 struct Cli {
-    /// the base image that each layer will use
+    /// the base image that each build layer will use
     #[arg(short = 'i', long)]
     base_image: String,
+
+    /// the base image that each exec layer will use
+    #[arg(long)]
+    exec_base_image: Option<String>,
 
     /// Command to convert a dependency name to an action, such as apt installing
     /// Any occurrence of `{}` will be replaced with the dependencies for a single package
@@ -340,6 +344,10 @@ fn main() -> Result<()> {
     let artifact_dir = cli.artifact_dir.unwrap_or_default();
     let artifact_dir = artifact_dir.as_str();
     let base_image = cli.base_image.as_str();
+    let exec_base_image = cli
+        .exec_base_image
+        .as_ref()
+        .map_or(base_image, |s| s.as_str());
     let min_build_popularity = cli.build_min_popularity.unwrap_or(4);
     let min_exec_popularity = cli.exec_min_popularity.unwrap_or(4);
     let default_resolver = cli.default_resolver.as_str();
@@ -612,7 +620,7 @@ fn main() -> Result<()> {
     writeln!(out_file, "run {}", resolved_build_top_layer)?;
     // exec
     writeln!(out_file)?;
-    writeln!(out_file, "from {} as {}", base_image, exec_base)?;
+    writeln!(out_file, "from {} as {}", exec_base_image, exec_base)?;
     writeln!(out_file, "run {}", resolved_exec_top_layer)?;
 
     // generate dockerfile with these layers
