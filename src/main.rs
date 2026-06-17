@@ -11,7 +11,7 @@ use clap::Parser;
 use color_eyre::Section;
 use color_eyre::eyre::{Result, WrapErr, eyre};
 use env_logger::Env;
-use ignore::Walk;
+use ignore::WalkBuilder;
 use petgraph::{
     Directed,
     graphmap::GraphMap,
@@ -322,6 +322,10 @@ struct Cli {
     /// whether to overwrite the build_top_layer and exec_top_layer of the dockerimage
     #[arg(long)]
     overwrite_top_layer: bool,
+
+    /// whether or not to follow symlinks. Defaults to false
+    #[arg(long)]
+    follow: bool,
 }
 
 fn main() -> Result<()> {
@@ -352,6 +356,7 @@ fn main() -> Result<()> {
     let extra_exec_commands = cli.extra_exec_command;
     let ignore: BTreeSet<Name> = cli.ignore.into_iter().map(Into::into).collect();
     let overwrite_top_layer = cli.overwrite_top_layer;
+    let follow_links = cli.follow;
 
     // construct map of dependencies to popularity of the dependency
     let mut build_popularity = PackagePopularity::new();
@@ -359,7 +364,9 @@ fn main() -> Result<()> {
 
     let mut local_packages = Packages::new();
 
-    for path in Walk::new(&target_path)
+    for path in WalkBuilder::new(&target_path)
+        .follow_links(follow_links)
+        .build()
         .filter_map(Result::ok)
         .filter_map(|p| Utf8Path::from_path(p.path()).map(Utf8Path::to_path_buf))
         .filter(|p| p.ends_with("package.xml"))
