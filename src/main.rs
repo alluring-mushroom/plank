@@ -7,7 +7,7 @@ use std::sync::LazyLock;
 
 use atomic_write_file::AtomicWriteFile;
 use camino::{Utf8Path, Utf8PathBuf};
-use clap::Parser;
+use clap::{Args, Parser, Subcommand};
 use color_eyre::Section;
 use color_eyre::eyre::{Result, WrapErr, eyre};
 use env_logger::Env;
@@ -42,6 +42,7 @@ type Layers = BTreeMap<Name, Layer>;
 type PackagePopularity = BTreeMap<Name, u32>;
 // Doesn't use Name or similar for efficiency. The strings are split a whole bunch
 type Resolvers<'a, 'b> = HashMap<&'a str, &'b str>;
+// type Resolvers = HashMap<String, String>;
 
 /// The name of a local dependency or system dependency
 #[derive(PartialEq, PartialOrd, Eq, Ord, Clone, Serialize, Deserialize, Hash)]
@@ -79,7 +80,7 @@ impl Name {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Serialize)]
 struct Package {
     path: Utf8PathBuf,
     build: BTreeSet<Name>,
@@ -213,7 +214,7 @@ fn expand_dependencies(
             let mut resolved = Vec::new();
             let mut remaining = BTreeSet::new();
             for dependency in &dependencies.system_dependencies {
-                if let Some(&command) = package_resolvers.get(&dependency.as_str()) {
+                if let Some(command) = package_resolvers.get(dependency.as_str()) {
                     if command.is_empty() {
                         continue;
                     }
@@ -253,7 +254,22 @@ fn expand_dependencies(
 
 #[derive(Parser)]
 #[command(version, about, long_about = None)]
+#[command(propagate_version = true)]
 struct Cli {
+    #[command(subcommand)]
+    command: Commands,
+}
+
+#[derive(Subcommand)]
+enum Commands {
+    Generate(Generate),
+
+    Query(Query),
+}
+
+/// Generate the Dockerfile
+#[derive(Args)]
+struct Generate {
     /// the base image that each build layer will use
     #[arg(short = 'i', long)]
     base_image: String,
@@ -332,44 +348,97 @@ struct Cli {
     follow: bool,
 }
 
+/// Query for package information
+#[derive(Args)]
+struct Query {
+    /// Output the list of discovered packages as JSON
+    #[arg(long, required = true)]
+    packages: bool,
+
+    /// Path to search for packages. Defaults to CWD
+    path: Option<String>,
+
+    /// dependencies to ignore if they are seen
+    #[arg(long)]
+    ignore: Vec<String>,
+
+    /// whether or not to follow symlinks. Defaults to false
+    #[arg(long)]
+    follow: bool,
+}
+
 fn main() -> Result<()> {
     env_logger::Builder::from_env(Env::default().default_filter_or("info")).init();
     color_eyre::install()?;
 
     // get cli args from user
     let cli = Cli::parse();
-    let target_path = cli.path.unwrap_or("./".to_string());
-    let output_path = Utf8PathBuf::from(cli.output.unwrap_or("Dockerfile".to_string()));
-    let include_dockerfiles = cli.include.into_iter().map(Utf8PathBuf::from);
-    let artifact_dir = cli.artifact_dir.unwrap_or_default();
-    let artifact_dir = artifact_dir.as_str();
-    let base_image = cli.base_image.as_str();
-    let exec_base_image = cli
-        .exec_base_image
-        .as_ref()
-        .map_or(base_image, |s| s.as_str());
-    let min_build_popularity = cli.build_min_popularity.unwrap_or(4);
-    let min_exec_popularity = cli.exec_min_popularity.unwrap_or(4);
-    let default_resolver = cli.default_resolver.as_str();
-    let package_resolvers = {
-        let resolvers: Result<HashMap<&str, &str>, &str> = cli
-            .package
-            .iter()
-            .map(|s| s.split_once(':').ok_or(s.as_str()))
-            .collect();
-        resolvers.map_err(|e| eyre!("Couldn't process a --package argument: '{}'", e))?
-    };
-    let build_command = cli.build_command.as_str();
-    let exec_command = cli.exec_command;
-    let extra_exec_commands = cli.extra_exec_command;
-    let ignore: BTreeSet<Name> = cli.ignore.into_iter().map(Into::into).collect();
-    let overwrite_top_layer = cli.overwrite_top_layer;
-    let follow_links = cli.follow;
+    match cli.command {
+        Commands::Generate(args) => {
+            let target_path = args.path.unwrap_or("./".to_string());
+            let output_path = Utf8PathBuf::from(args.output.unwrap_or("Dockerfile".to_string()));
+            let include_dockerfiles = args.include.into_iter().map(Utf8PathBuf::from);
+            let artifact_dir = args.artifact_dir.unwrap_or_default();
+            let artifact_dir = artifact_dir.as_str();
+            let base_image = args.base_image.as_str();
+            let exec_base_image = args
+                .exec_base_image
+                .as_ref()
+                .map_or(base_image, |s| s.as_str());
+            let min_build_popularity = args.build_min_popularity.unwrap_or(4);
+            let min_exec_popularity = args.exec_min_popularity.unwrap_or(4);
+            let default_resolver = args.default_resolver.as_str();
+            let package_resolvers = {
+                let resolvers: Result<HashMap<&str, &str>, &str> = args
+                    .package
+                    .iter()
+                    .map(|s| s.split_once(':').ok_or(s.as_str()))
+                    .collect();
+                resolvers.map_err(|e| eyre!("Couldn't process a --package argument: '{}'", e))?
+            };
+            let build_command = args.build_command.as_str();
+            let exec_command = args.exec_command;
+            let extra_exec_commands = args.extra_exec_command;
+            let ignore: BTreeSet<Name> = args.ignore.into_iter().map(Into::into).collect();
+            let overwrite_top_layer = args.overwrite_top_layer;
+            let follow_links = args.follow;
 
-    // construct map of dependencies to popularity of the dependency
-    let mut build_popularity = PackagePopularity::new();
-    let mut exec_popularity = PackagePopularity::new();
+            generate(
+                &target_path,
+                follow_links,
+                min_build_popularity,
+                min_exec_popularity,
+                ignore,
+                default_resolver,
+                &output_path,
+                include_dockerfiles.collect(),
+                base_image,
+                exec_base_image,
+                build_command,
+                package_resolvers,
+                artifact_dir,
+                exec_command,
+                extra_exec_commands,
+                overwrite_top_layer,
+            )?
+        }
+        Commands::Query(args) => {
+            let target_path = args.path.as_deref().unwrap_or("./");
+            let ignore: BTreeSet<Name> = args.ignore.iter().cloned().map(Into::into).collect();
+            let follow_links = args.follow;
+            query(follow_links, target_path, ignore)?
+        }
+    }
 
+    Ok(())
+}
+
+fn walk_packages(
+    target_path: &str,
+    follow_links: bool,
+) -> Result<(Packages, PackagePopularity, PackagePopularity)> {
+    let mut build_count = PackagePopularity::new();
+    let mut exec_count = PackagePopularity::new();
     let mut local_packages = Packages::new();
 
     for path in WalkBuilder::new(&target_path)
@@ -393,14 +462,14 @@ fn main() -> Result<()> {
         );
 
         for build_dependency in &package.build {
-            build_popularity
+            build_count
                 .entry(build_dependency.to_owned())
                 .and_modify(|e| *e += 1)
                 .or_insert(1);
         }
 
         for exec_dependency in &package.exec {
-            exec_popularity
+            exec_count
                 .entry(exec_dependency.to_owned())
                 .and_modify(|e| *e += 1)
                 .or_insert(1);
@@ -409,11 +478,54 @@ fn main() -> Result<()> {
         local_packages.insert(name.into(), package);
     }
 
+    Ok((local_packages, build_count, exec_count))
+}
+
+fn query(
+    follow_links: bool,
+    target_path: &str,
+    ignore: BTreeSet<Name>,
+) -> Result<()> {
+    let (local_packages, _build_popularity, _exec_popularity) =
+        walk_packages(target_path, follow_links)?;
+
+    let packages: BTreeMap<Name, Package> = local_packages
+        .into_iter()
+        .filter(|(name, _)| !ignore.contains(name))
+        .collect();
+
+    let output = serde_json::to_string_pretty(&packages)?;
+    println!("{}", output);
+
+    Ok(())
+}
+
+fn generate(
+    target_path: &str,
+    follow_links: bool,
+    min_build_popularity: u32,
+    min_exec_popularity: u32,
+    ignore: BTreeSet<Name>,
+    default_resolver: &str,
+    output_path: &Utf8Path,
+    include_dockerfiles: Vec<Utf8PathBuf>,
+    base_image: &str,
+    exec_base_image: &str,
+    build_command: &str,
+    package_resolvers: Resolvers,
+    artifact_dir: &str,
+    exec_command: Option<String>,
+    extra_exec_commands: Vec<String>,
+    overwrite_top_layer: bool,
+) -> Result<()> {
+    // construct map of dependencies to popularity of the dependency
+    let (local_packages, build_count, exec_count) = walk_packages(target_path, follow_links)?;
+
     // Invert the value and key so we can access ranges of popularity. This will allow constructing
     // a layer that only consists of a certain popularity or higher
     let build_popularity = {
         let mut map = BTreeMap::<u32, Vec<Name>>::new();
-        for (package, popularity) in build_popularity
+        for (package, popularity) in build_count
             .into_iter()
             .filter(|e| !local_packages.contains_key(&e.0))
         {
@@ -425,7 +537,7 @@ fn main() -> Result<()> {
 
     let exec_popularity = {
         let mut map = BTreeMap::<u32, Vec<Name>>::new();
-        for (package, popularity) in exec_popularity
+        for (package, popularity) in exec_count
             .into_iter()
             .filter(|e| !local_packages.contains_key(&e.0))
         {
